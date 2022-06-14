@@ -1,0 +1,608 @@
+---
+title: "Figure 1"
+author: "David Gresham"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output: html_notebook
+---
+
+This script generates **Figure 1** and associated supplemental figures for the paper *"Predicting seasonal influenza vaccine response using global gene expression profiling"* by Forst et al., that summarizes demographic and serological features of the study participants.
+
+## Load packages and view session info
+
+```{r}
+#library(biomaRt)
+#library(openxlsx)
+library(tidyverse)
+library(patchwork)
+library(png)
+library(ggpubr)
+library(ggbeeswarm)
+
+getwd()
+sessionInfo()
+
+
+theme_set(theme_bw()) #patchwork theme for all figures
+```
+
+## Read in Data
+
+This script uses the metadata dataframe generated using the script `preprocessing.Rmd`.
+The data also include the RNAseq count data although those data are not used in the generation of these figures and tables.
+
+```{r}
+load("../data.RData")
+ls()
+```
+
+
+## Participant metrics - Data for Table 1
+
+Summary of participant metadata for Table 1 of paper
+
+```{r}
+dim(metadata) # includes 275 participants
+
+#analysis of participant metadata
+metadata_tibble <- tibble(metadata)
+View(metadata_tibble)
+dim(metadata_tibble)
+sum(metadata_tibble$Gender =="M")
+sum(metadata_tibble$Gender =="F")
+mean(metadata_tibble$Age)
+sd(metadata_tibble$Age)
+range(metadata_tibble$Age)
+
+#BMI
+range(metadata_tibble$BMI_Value)
+mean(metadata_tibble$BMI_Value)
+sd(metadata_tibble$BMI_Value)
+
+metadata_tibble %>%
+  group_by(BMI_Category) %>%
+  count(sort = T)
+
+metadata_tibble %>%
+  group_by(Race_Ethnicity) %>%
+  count(sort = T) 
+
+metadata_tibble %>%
+  group_by(`Smoking.History:.Ever.Use`) %>%
+  count(sort = T) 
+
+metadata_tibble %>%
+  group_by(`Smoking.History:.Current.Use`) %>%
+  count(sort = T)
+
+#Small n.  Not relevant.  Exclude
+metadata_tibble %>%
+  group_by(`Sleep.apnea?`) %>%
+  count(sort = T)
+
+metadata_tibble %>%
+  group_by(`Vaccine.last.season.(fall.2018-spring.2019)`) %>%
+  count(sort = T)
+
+metadata_tibble %>%
+  group_by(`Vaccine.2.seasons.ago.(fall.2017-spring.2018)`) %>%
+  count(sort = T)
+
+metadata_tibble %>%
+  group_by(`Vaccine.3.seasons.ago.(fall.2016-spring.2017)`) %>%
+  count(sort = T)
+
+metadata_tibble %>%
+  group_by(Prevacc.naive) %>%
+  count(sort = T)
+
+#Comorbidities
+
+metadata_tibble %>%
+  group_by(Comorbidity.1) %>%
+  count(sort = T) 
+
+metadata_tibble %>%
+  group_by(Comorbidity.2) %>%
+  count(sort = T) 
+
+metadata_tibble %>%
+  group_by(Comorbidity.3) %>%
+  count(sort = T) 
+
+#Vaccine dose
+
+metadata_tibble %>%
+  group_by(Vaccine) %>%
+  count(sort = T)
+
+
+```
+
+##  Supplementary figure 1
+HAI baseline values for each strain. 
+
+```{r}
+#range(metadata$D0_Baseline_HAI_H1N1)
+#mean(metadata$D0_Baseline_HAI_H1N1)
+#sd(metadata$D0_Baseline_HAI_H1N1)
+
+p1 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_H1N1))) +
+  geom_histogram() + 
+#  scale_x_continuous(trans='log2') +
+  xlim(c(2,10.5)) +
+  xlab("H1N1 (A/Brisbane/2/2018) baseline HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p2 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_H3N2))) +
+  geom_histogram() + 
+#   scale_x_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+  xlab("H3N2 (A/Kansas/14/2017) baseline HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p3 <- ggplot(metadata, aes(x = log2(D0_Baseline_Victoria))) +
+  geom_histogram() +
+#   scale_x_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+  xlab("Victoria (B/Colorado/6/2017) baseline HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p4 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_Yamagata))) +
+  geom_histogram() +
+#   scale_x_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+  xlab("Yamagata (B/Phuket/3073/2013) baseline HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p1 + p2 + p3 + p4 + plot_annotation(tag_levels = 'A')
+ggsave("Supplementary Figure 1.pdf")
+ggsave("Supplementary Figure 1.png")
+```
+## Supplementary figure 2
+HAI response values for each strain.  
+
+```{r}
+#range(metadata$D28_Baseline_HAI_H1N1)
+#mean(metadata$D278_Baseline_HAI_H1N1)
+#sd(metadata$D28_Baseline_HAI_H1N1)
+
+p5 <- ggplot(metadata, aes(x = log2(D28_HAI_H1N1))) +
+  geom_histogram() +
+#  scale_x_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+  xlab("H1N1 (A/Brisbane/2/2018) response HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p6 <- ggplot(metadata, aes(x = log2(D28_HAI_H3N2))) +
+  geom_histogram() + 
+#   scale_x_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+  xlab("H3N2 (A/Kansas/14/2017) response HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p7 <- ggplot(metadata, aes(x = log2(D28_HAI_Victoria))) +
+  geom_histogram() +
+#   scale_x_continuous(trans='log2') +
+  xlim(c(2,10.5)) +
+  xlab("Victoria (B/Colorado/6/2017) response HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+#####
+#split D28 Yamagata based on dose: 
+
+#Standard dose with yamagata
+p81 <- metadata %>%
+  filter(Vaccine  == "Standard Dose") %>% 
+  ggplot(aes(x = log2(D28_HAI_Yamagata))) +
+  geom_histogram() + 
+  xlim(c(2,10.5)) +
+#   scale_x_continuous(trans='log2') +
+  xlab("Yamagata (B/Phuket/3073/2013) response HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+#High dose without Yamagata
+p82 <- metadata %>%
+  filter(Vaccine  == "High Dose") %>% 
+  ggplot(aes(x = log2(D28_HAI_Yamagata))) +
+  geom_histogram() +
+   xlim(c(2,10.5)) +
+ #  scale_x_continuous(trans='log2') +
+  xlab("Yamagata (B/Phuket/3073/2013) response HAI") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 10)
+  )
+
+p5 + p6 + p7 + p81 + plot_annotation(tag_levels = 'A')
+
+ggsave("Supplementary Figure 2.pdf")
+ggsave("Supplementary Figure 2.png")
+```
+
+## Alternative supplementary figure 2
+not currently included.
+
+```{r}
+#((p1/p5) | (p2/p6) | (p3/p7) | (p4/p8)) + plot_annotation(tag_levels = 'A')
+#ggsave("Alternative Supplementary Figure 1.pdf")
+#ggsave("Alternative Supplementary Figure 1.png")
+```
+
+
+## Supplementary figure 3
+HAI - baseline vs response values for each strain and average. 
+
+```{r}
+cor.test(metadata$D0_Baseline_HAI_H1N1,metadata$D28_HAI_H1N1, method="spearman")  
+cor.test(metadata$D0_Baseline_HAI_H3N2,metadata$D28_HAI_H3N2, method="spearman")  
+cor.test(metadata$D0_Baseline_HAI_Yamagata,metadata$D28_HAI_Yamagata, method="spearman")
+
+metadata_SD <- metadata %>%
+  filter(Vaccine  == "Standard Dose")
+cor.test(metadata_SD$D0_Baseline_HAI_Yamagata, metadata_SD$D28_HAI_Yamagata, method="spearman")  
+
+p9 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_H1N1),
+                           y = log2(D28_HAI_H1N1 ))) +
+#   scale_x_continuous(trans='log2') +
+#   scale_y_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+    ylim(c(2,10.5)) +
+   xlab("log2 H1N1 Baseline HAI ") +
+   ylab("log2 H1N1 Response HAI") +
+   geom_point() +
+  geom_jitter() +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+p10 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_H3N2), 
+                           y =  log2(D28_HAI_H3N2))) +
+#   scale_x_continuous(trans='log2') +
+#   scale_y_continuous(trans='log2') +
+     xlim(c(2,10.5)) +
+    ylim(c(2,10.5)) +
+   xlab("log2 H3N2 Baseline HAI ") +
+   ylab("log2 H3N2 Response HAI") +
+   geom_point() +
+   geom_jitter() +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+
+p11 <- ggplot(metadata, aes(x = log2(D0_Baseline_Victoria),
+                          y = log2(D28_HAI_Victoria))) +
+#   scale_x_continuous(trans='log2') +
+#   scale_y_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+    ylim(c(2,10.5)) +
+   xlab("log2 Victoria Baseline HAI ") +
+   ylab("log2 Victoria Response HAI") +
+   geom_point() +
+   geom_jitter() +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+p12 <- metadata %>%
+  filter(Vaccine  == "Standard Dose") %>% 
+  ggplot(aes(x = log2(D0_Baseline_HAI_Yamagata),
+                          y = log2(D28_HAI_Yamagata))) +
+#   scale_x_continuous(trans='log2') +
+#   scale_y_continuous(trans='log2') +
+    xlim(c(2,10.5)) +
+    ylim(c(2,10.5)) +
+   xlab("log2 Yamagata Baseline HAI ") +
+   ylab("log2 Yamagata Response HAI") +
+   geom_point() +
+   geom_jitter() +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+
+p9 + p10 + p11 + p12 + plot_annotation(tag_levels = 'A')
+
+ggsave("Supplementary Figure 3.pdf")
+ggsave("Supplementary Figure 3.png")
+
+```
+
+## Supplementary figure 4
+
+HAI baseline vs seroconversion per strain
+
+```{r}
+cor.test(metadata$D0_Baseline_HAI_H1N1,metadata$H1N1Seroconversion_MRH_h, method="spearman" )
+cor.test(metadata$D0_Baseline_HAI_H3N2,metadata$H3N2Seroconversion_MRH_h, method="spearman" )
+# metadata %>%
+#   filter(Vaccine  == "Standard Dose") %>% 
+# cor.test(metadata$D0_Baseline_HAI_Yamagata,metadata$YamagataSeroconversion_MRH, method="spearman" )
+cor.test(metadata$D0_Baseline_Victoria,metadata$VictoriaSeroconversion_MRH, method="spearman" )
+
+p13 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_H1N1),
+                           y = log2(H1N1Seroconversion_MRH_h))) +
+   geom_point() +
+   geom_jitter() +
+#  scale_x_continuous(trans='log2') +
+  xlab("log2 H1N1 (A/Brisbane/2/2018) baseline HAI") +
+  ylab("log2 seroconversion") +
+    xlim(c(2,10.5)) +
+  ylim(c(0,8)) +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+p14 <- ggplot(metadata, aes(x = log2(D0_Baseline_HAI_H3N2), 
+                           y =  log2(H3N2Seroconversion_MRH_h))) +
+   geom_point() +
+  geom_jitter() +
+#   scale_x_continuous(trans='log2') +
+   xlab("log2 H3N2 (A/Kansas/14/2017) baseline HAI") +
+   ylab("log2 seroconversion") +
+    xlim(c(2,10.5)) +
+  ylim(c(0,8)) +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+p15 <- ggplot(metadata, aes(x = log2(D0_Baseline_Victoria),
+                          y = log2(VictoriaSeroconversion_MRH_h))) +
+   geom_point() +
+  geom_jitter() +
+ #  scale_x_continuous(trans='log2') +
+   xlab("log2 Victoria (B/Colorado/6/2017) baseline HAI") +
+   ylab("log2 seroconversion") +
+    xlim(c(2,10.5)) +
+  ylim(c(0,8)) +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+p16 <-  metadata %>%
+  filter(Vaccine  == "Standard Dose") %>% 
+  ggplot(aes(x = log2(D0_Baseline_HAI_Yamagata),
+                          y = log2(YamagataSeroconversion_MRH))) +
+   geom_point() +
+  geom_jitter() +
+ #  scale_x_continuous(trans='log2') +
+   xlab("log2 Yamagata (B/Phuket/3073/2013) baseline HAI") +
+   ylab("log2 seroconversion") +
+    xlim(c(2,10.5)) +
+  ylim(c(0,8)) +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8)
+  )
+
+
+p13 + p14 + p15 + p16 + plot_annotation(tag_levels = 'A')
+
+ggsave("Supplementary Figure 4.pdf")
+ggsave("Supplementary Figure 4.png")
+```
+
+##Supplementary figure 5
+HAI response vs seroconversion per strain
+
+```{r}
+cor.test(metadata$D28_HAI_H1N1,metadata$H1N1Seroconversion_MRH_h, method="spearman" )
+cor.test(metadata$D28_HAI_H3N,metadata$H3N2Seroconversion_MRH_h, method="spearman" )
+cor.test(metadata$D28_HAI_Yamagata,metadata$YamagataSeroconversion_MRH, method="spearman" )
+cor.test(metadata$D28_HAI_Victoria,metadata$VictoriaSeroconversion_MRH_h, method="spearman" )
+
+p17 <- ggplot(metadata, aes(x = log2(D28_HAI_H1N1),
+                           y = log2(H1N1Seroconversion_MRH_h))) +
+  geom_point() +  
+  geom_jitter() +
+#  scale_x_continuous(trans='log2') +
+  xlab("log 2 H1N1 (A/Brisbane/2/2018) response HAI") +
+  ylab("log2 seroconversion")  +
+  xlim(c(2,10.5)) +
+  ylim(c(0,8))
+
+p18 <- ggplot(metadata, aes(x = log2(D28_HAI_H3N2), 
+                           y =  log2(H3N2Seroconversion_MRH_h))) +
+   geom_point() +
+    geom_jitter() +
+#   scale_x_continuous(trans='log2') +
+   xlab("log2 H3N2 (A/Kansas/14/2017) response HAI") +
+   ylab("log2 seroconversion") +
+   xlim(c(2,10.5)) +
+   ylim(c(0,8))
+
+p19 <- ggplot(metadata, aes(x = log2(D28_HAI_Victoria),
+                          y = log2(VictoriaSeroconversion_MRH_h))) +
+   geom_point() + 
+    geom_jitter() +
+ #  scale_x_continuous(trans='log2') +
+   xlab("log2 Victoria (B/Colorado/6/2017) response HAI") +
+   ylab("log2 seroconversion") +
+   xlim(c(2,10.5)) +
+   ylim(c(0,8))
+
+p20 <- metadata %>%
+  filter(Vaccine  == "Standard Dose") %>% 
+  ggplot(aes(x = log2(D28_HAI_Yamagata),
+                          y = log2(YamagataSeroconversion_MRH))) +
+   geom_point() +
+    geom_jitter() +
+#   scale_x_continuous(trans='log2') +
+   xlab("log2 Yamagata (B/Phuket/3073/2013) response HAI") +
+   ylab("log2 seroconversion") +
+   xlim(c(2,10.5)) +
+   ylim(c(0,8))
+
+p201 <- ggplot(metadata, aes(x = log2(YamagataSeroconversion_MRH), y = Vaccine, color = Vaccine)) +
+   geom_violin() +
+   geom_point(position = position_jitter()) +
+   geom_boxplot(width = 0.1) +
+   coord_flip() +
+   theme(legend.position = "none") +
+   xlab("Yamagata seroconversion score") +
+   ylab("Dose")
+
+p202 <- ggplot(metadata, aes(x = log2(H1N1Seroconversion_MRH_h), y = Vaccine, color = Vaccine)) +
+   geom_violin() +
+   geom_point(position = position_jitter()) +
+   geom_boxplot(width = 0.1) +
+   coord_flip() +
+   theme(legend.position = "none") +
+   xlab("H1N1 seroconversion score") +
+   ylab("Dose")
+
+p203 <- ggplot(metadata, aes(x = log2(H3N2Seroconversion_MRH_h), y = Vaccine, color = Vaccine)) +
+   geom_violin() +
+   geom_point(position = position_jitter()) +
+   geom_boxplot(width = 0.1) +
+   coord_flip() +
+   theme(legend.position = "none") +
+   xlab("H3N2 seroconversion score") +
+   ylab("Dose")
+
+p204 <- ggplot(metadata, aes(x = log2(VictoriaSeroconversion_MRH_h), y = Vaccine, color = Vaccine)) +
+   geom_violin() +
+   geom_point(position = position_jitter()) +
+   geom_boxplot(width = 0.1) +
+   coord_flip() +
+   theme(legend.position = "none") +
+   xlab("Victoria seroconversion score") +
+   ylab("Dose")
+
+#p17 + p18 + p19 + p20 | p201 + plot_annotation(tag_levels = 'A')
+
+p201
+
+#p202+ p203 + p204 + p201 + plot_annotation(tag_levels = 'A')
+
+ggsave("Supplementary Figure 5.pdf")
+ggsave("Supplementary Figure 5.png")
+```
+
+
+
+## Figure 1
+Includes
+
+  * A) Study design
+  * B) Relationship between composite baseline HAI and composite seroconversion
+  * D) Relationship between composite seroconversion scores and BMI
+  * C) Variation in composite seroconversion scores between sexes. 
+  * D) Variation in composite seroconversion scores as a function of age.
+  
+```{r}
+p21 <- ggplot(metadata, aes(x = log2(Composite_Baseline),
+                     y = log2(average_seroconversion))) +
+  geom_point() + 
+  geom_jitter() +
+  xlim(c(2,9)) +
+  ylim(c(0,7)) +
+  geom_smooth(method = "lm") + 
+  xlab("log2 Average Baseline HAI") +
+   ylab("Average seroconversion") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 5)
+  )
+
+
+cor.test(metadata$Composite_Baseline, metadata$average_seroconversion, method="spearman")
+
+p22 <- ggplot(metadata, aes(x = BMI_Value,
+                     y = log2(average_seroconversion))) +
+  xlim(15,60) +
+   ylim(c(0,7)) +
+  geom_point() + 
+  geom_jitter() +
+  geom_smooth(method = "lm") + 
+  xlab("BMI") +
+  ylab("Average seroconversion") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 5)
+  )
+
+cor.test(metadata$BMI_Value, metadata$average_seroconversion, na.rm=T, method="spearman") 
+
+p23 <- ggplot(metadata, aes(x = Age,
+                     y = log2(average_seroconversion))) +
+  geom_point() + 
+  geom_jitter() +
+  ylim(c(0,7)) +
+  geom_smooth(method = "lm") +
+  xlab("Age") +
+  ylab("Average seroconversion") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 5)
+  )
+
+cor.test(metadata$Age, metadata$average_seroconversion, method="spearman") 
+
+#  p24 <- ggplot(metadata, aes(x = log2(average_seroconversion), y = Gender, color = Gender)) +
+#    geom_violin() +
+#    geom_boxplot(width = 0.1) +
+#    coord_flip() +
+#    xlab("log2 average seroconversion")
+# 
+# summary(aov(metadata$average_seroconversion ~ metadata$Gender))
+
+ p24 <- ggplot(metadata, aes(x = log2(average_seroconversion), y = Prevacc.naive, color = Prevacc.naive)) +
+   geom_violin() +
+  geom_point(position = position_jitter()) +
+   geom_boxplot(width = 0.1) +
+   coord_flip() +
+     xlim(c(0,7)) +
+   theme(legend.position = "none") +
+   xlab("Average seroconversion") +
+   ylab("Vaccinated in prior 3 years") +
+  theme(
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 5)
+  )
+
+
+image <- readPNG("./Figure 1a.png")
+a <- ggplot() +
+  ggpubr::background_image(image) 
+
+
+a /( p21 | p22) / ( p23 | p24 ) + plot_annotation(tag_levels = 'A') 
+
+ggsave("Figure 1.pdf")
+ggsave("Figure 1.png")
+
+```
+
+
