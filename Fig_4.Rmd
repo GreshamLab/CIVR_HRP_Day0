@@ -1,0 +1,500 @@
+---
+title: "Figures 4, S14, S15, S16"
+author: 
+  - name: "Christian Forst"
+    email: chris@santafe.edu
+date: "6/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# MEGENA Analysis Pipeline
+
+## Load packages and view sessionInfo
+
+```{r,warning=FALSE,message = FALSE}
+library(biomaRt)
+library(ggplot2)
+library(gprofiler2)
+library(reshape2)
+library(SuperExactTest)
+library(EnhancedVolcano)
+```
+
+## Initiating additional fuctions
+
+```{r Initialization}
+options(stringsAsFactors=F)
+```
+
+## Load data
+
+```{r}
+load("Fig_4.RData")
+```
+
+
+
+## Correlation preprocessing
+
+```{r}
+covar <- c("average_log2Baseline", "average_log2D28", "average_log2SC")
+
+metadata <- metaNew
+
+f <- rnaseq.all.logCPM
+rownames(f) <- f[,1]
+
+rownames(metadata) <- metadata$File.Name
+trait0 <- metadata
+
+common.samples = intersect(colnames(f), rownames(trait0))
+
+geno.xT <- t(f[,common.samples])
+bg  <- colnames(geno.xT)
+bg.g<- unique(genes[bg,"hgnc_symbol"])
+
+trait <- trait0[common.samples,covar]
+
+```
+
+## Run correlation analysis
+
+```{r Correlation}
+indir  <- "MEGENA/rnaseq-merged-counts_Matt_all_logCPM_RunIDMonthVacAdj_FDR0.05/"
+outdir <- indir
+tmfile <- paste0(indir, "multiscale_significant.modules.txt") # the default MEGENA module file
+tmbase <- paste0(outdir, rev(strsplit(indir, split="/")[[1]])[1])         # name your output file
+
+msm <- readSigModules(tmfile)
+```
+## Do some correlation analysis
+
+### First just calculate the 1st principal component 
+
+```{r PC, echo=F, message=FALSE, warning=FALSE}
+PCs <- NULL
+for (i in 1:length(msm)) {
+  message("  Processing module ", names(msm)[i])
+  gs <- intersect(colnames(geno.xT), msm[[i]])
+  x.modT <- geno.xT[, gs]   # select the corresponding genes from module
+  x.pca  <-prcomp(x.modT)$x[,1]
+  x.pca.sign<-sign(sum(cor(x.pca, x.modT, use="na.or.complete")))
+  if ( is.na(x.pca.sign)) { next }
+  x.pca <- x.pca * x.pca.sign
+  tmp <- data.frame(Module=gsub("c1_", "M", names(msm)[i]), module=names(msm)[i], t(x.pca))
+  PCs <- rbind(PCs, tmp)
+}
+write.table(PCs, file=paste0(tmbase,"_modules_PC1.tsv"), row.names=F, quote=F, sep="\t")
+```
+
+### Second, correlate 1st PC with trait (for now ignoring the calculatin of the 1st PC from above)
+
+```{r Corr2, warning=FALSE, echo=F, message=F}
+ message("Calculate MEGENA correlation")
+#MEGENA
+ trait.pcaSc <- NULL
+ trait.pcaSp <- NULL
+ for (i in 1:length(msm)) {
+  message("  Processing module ", names(msm)[i])
+  gs <- intersect(colnames(geno.xT), msm[[i]])
+  x.modT <- geno.xT[, gs]   # select the corresponding genes from module
+  x.pca  <-prcomp(x.modT)$x[,1]
+  x.pca.sign<-sign(sum(cor(x.pca, x.modT, use="na.or.complete")))
+  if ( is.na(x.pca.sign)) { next }
+  x.pca <- x.pca * x.pca.sign  
+  x.cor  <- apply(trait, 2, function(x) cor.test(x.pca,x,use="na.or.complete",method="spearman")$estimate)
+  x.corp <- apply(trait, 2, function(x) cor.test(x.pca,x,use="na.or.complete",method="spearman")$p.value)
+  trait.pcaSp <- rbind(trait.pcaSp, c(names(msm)[i],x.corp))  
+  trait.pcaSc <- rbind(trait.pcaSc,  c(names(msm)[i],x.cor))
+}
+q <- apply(trait.pcaSp[,-1], 2, function(x) p.adjust(as.numeric(x), method="fdr")) 
+trait.pcaSq <- data.frame(trait.pcaSc[,1], q)
+colnames(trait.pcaSq) <- colnames(trait.pcaSp)
+```
+
+## Plot correlations using EnhancedVolcanoPlot
+
+```{r,fig.height=5,fig.width=8}
+ePlot <- list()
+
+for (i in 2:ncol(trait.pcaSc)) {
+  tmp <- data.frame(module=trait.pcaSc[,1], Module=gsub("c1_", "M", trait.pcaSc[,1]), corr=as.numeric(trait.pcaSc[,i]), pval=as.numeric(trait.pcaSp[,i]), qval=as.numeric(trait.pcaSq[,i]))
+  eP <- EnhancedVolcano(tmp, tmp$Module, "corr", "pval", pCutoff = 0.05, FCcutoff = 0.1, labSize = 5, xlab="Spearman Corr.", drawConnectors = T, legendLabels=c('NS', 'Corr.', 'P', 'P & Corr.'), title=colnames(trait.pcaSc)[i], xlim=c(-.65,.65))
+  ePlot <- c(ePlot, list(eP))
+}
+plot_grid(plotlist=ePlot[1:3], ncol=3, nrow=1)
+#plot_grid(plotlist=ePlot[4:6], ncol=3, nrow=1)
+```
+
+
+## Do the same with long correlation version
+
+```{r,fig.height=5,fig.width=12}
+ePlot <- list()
+
+#trait.long <- trait.pcaS.long
+trait.long <- tt2
+
+trait.long[grep("Base",trait.long$Trait),"Trait"] <- "Baseline HAI"
+trait.long[grep("D28",trait.long$Trait),"Trait"]  <- "Response HAI"
+trait.long[grep("SC",trait.long$Trait),"Trait"]   <- "Seroconversion"
+
+ts <- unique(trait.long$Trait)
+
+for (i in 1:3) {
+  tmp <- trait.long[which(trait.long$Trait==ts[i]),]
+  eP <- EnhancedVolcano(tmp, tmp$V1, "corr", "qval", pCutoff = 0.05, FCcutoff = 0.1,  labSize = 3, xlab="Spearman Corr.", drawConnectors = T, legendLabels=c('NS', 'Corr.', 'P', 'P & Corr.'), legendLabSize=10, title=ts[i], xlim=c(-.65,.65))
+  ePlot <- c(ePlot, list(eP))
+}
+ePG1 <- plot_grid(plotlist=ePlot[1:2], ncol=2, nrow=1)
+plot_grid(plotlist=ePlot[1:3], ncol=3, nrow=1)
+ggsave("Papers/Figures/modules_avLog2Sero_qval_EnhV2.png")
+#plot_grid(plotlist=ePlot[4:6], ncol=3, nrow=1)
+```
+
+## Write separate correlation tables
+
+```{r}
+tname ="avLog2Sero"
+
+write.table(trait.pcaSc, file=paste0(tmbase, "_", tname, "_pcaSc.tsv"), row.names=F, quote=F, sep="\t")
+write.table(trait.pcaSp, file=paste0(tmbase, "_", tname, "_pcaSp.tsv"), row.names=F, quote=F, sep="\t")
+write.table(trait.pcaSq, file=paste0(tmbase, "_", tname, "_pcaSq.tsv"), row.names=F, quote=F, sep="\t")
+
+```
+
+## Reshape and processing for bubble plots
+
+```{r}
+# reshape
+tmp <-data.frame(trait.pcaSc)
+tmp[,-1] <- apply(tmp[,-1],2, as.numeric)
+traitc.long <- reshape(tmp, idvar="V1", varying = list(names(tmp)[-1]), v.names="corr", timevar="Trait", times=names(tmp)[-1], direction = "long")
+#
+tmp <-data.frame(trait.pcaSp)
+tmp[,-1] <- apply(tmp[,-1],2, as.numeric)
+colnames(tmp)[1] <- "V1"
+traitp.long <- reshape(tmp, idvar="V1", varying = list(names(tmp)[-1]), v.names="corr", timevar="Trait", times=names(tmp)[-1], direction = "long")
+#
+tmp <-data.frame(trait.pcaSq)
+tmp[,-1] <- apply(tmp[,-1],2, as.numeric)
+colnames(tmp)[1] <- "V1"
+traitq.long <- reshape(tmp, idvar="V1", varying = list(names(tmp)[-1]), v.names="corr", timevar="Trait", times=names(tmp)[-1], direction = "long")
+traits <- cbind(traitc.long, pval=traitp.long[,3], qval=traitq.long[,3])
+traits$V1 <- gsub("c1_", "M", traits$V1)
+
+write.table(traits, file=paste0(tmbase, "_", tname, "_long.tsv"), row.names=F, quote=F, sep="\t")
+
+```
+
+## Doing bubble plots
+
+```{r,fig.height=6,fig.width=8}
+tname <- "Matt_all_avSero_pval"
+#ix <- which(traits$qval <=0.27); length(ix)
+ix <- which(abs(traits$corr) >=0.13); length(ix)
+t2 <- traits[ix,]
+ggplot(data.frame(t2), aes(x=Trait, y=factor(V1))) + geom_point(aes(color=corr, size= -log10(qval))) +
+    scale_color_distiller(palette="RdYlBu", direction=-1, limits=c(-.41,.41)) + theme_bw() + labs(x="Trait", y="Modules", title=tname) +
+    theme_bw() + theme(text = element_text(size = 16), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+#ggsave(paste0(outdir,"module_", tname, "_corr_bubblePlot.png"), width = 8, height = 7)
+#ggsave(paste0(outdir,"module_", tname, "_corr_bubblePlot.pdf"), width = 8, height = 7)
+
+```
+
+## Prepare for module enrichment
+
+```{r}
+DEGs <- avSero.list
+#DEGs <- DEGs.PConly
+y <- msm
+b <- lapply(y, function(x) unique(genes[x,"hgnc_symbol"]))
+b <- lapply(b, setdiff, y="")
+
+tID <- "DEMatt_avLog2SeroRank"
+tID2<- "DEMSigDBenrich_avLog2SeroRank"
+
+```
+
+## Perform MEGENA enrichment
+
+```{r}
+tm.DEG <- NULL
+for (d in DEGs) {    # use DEGs list
+  o <- coexEnrich(y, d, bg)
+  tm.DEG <- cbind(tm.DEG, o)
+}
+cp <- apply(tm.DEG[,grep("p.value", colnames(tm.DEG))], 2, as.numeric)
+#cp <- apply(tm.DEG[,grep("corr.p.val", colnames(tm.DEG))], 2, as.numeric)
+ix<-apply(cp, 2, function(x) all(is.na(x)))
+cp <- cp[,which(!ix)]  # remove all NA columns
+if ( is.null(dim(cp))) {next}   # one-dim cp
+colnames(cp) <- names(DEGs)[!ix]
+rnk <- rankOrder(cp)
+module <- sub("c1_", "M", tm.DEG[,1])
+tmp <- cbind(tm.DEG[,1], module, rnk, cp) # cannot include cp matrix as # of DEGs differ
+#  tm.cp.rank <- rbind(tm.cp.rank, tmp)
+fn2 <- paste0(tmbase, "_", tID, ".tsv")
+write.table(tmp, file=fn2, row.names=F, quote=F, sep="\t")
+```
+
+
+## Do some more ranking using combined serological info
+
+```{r}
+cp2 <- apply(cbind(cp[,grep("Composite", colnames(cp))], trait.pcaSp[,grep("Composite", colnames(trait.pcaSp))]),2 , as.numeric)
+r2 <- rankOrder(cp2)
+```
+
+
+## Assemble matrix
+
+```{r}
+# use 'out' from the importedmodule enrichment table (above)
+t2 <- trait.pcaSc
+colnames(t2) <- paste0(colnames(t2), ".corr")
+out <- cbind(out, t2)
+t2 <- trait.pcaSp
+colnames(t2) <- paste0(colnames(t2), ".pval")
+out <- cbind(out, t2)
+t2 <- trait.pcaSq
+colnames(t2) <- paste0(colnames(t2), ".qval")
+out <- cbind(out, t2)
+#out <- data.frame(Sero.rnk=r2,out)
+out <- data.frame(avSero.rnk=rnk,out)
+
+fn3 <- paste0(tmbase, "_", tID2, "_traitCorr.tsv")
+write.table(out, file=fn3, row.names=F, quote=F, sep="\t")
+
+```
+
+## make some plots
+### Do some reshaping first
+
+```{r}
+num <- 10  # # to display
+# Careful! some out columns are not numeric!
+o <- order(out$avSero.rnk); ptt.t <- ""
+#o <- order(as.numeric(out$Age.pval));  ptt.t <- ""
+#o <- order(abs(out$Age.corr));  ptt.t <- ""
+#o <- order(as.numeric(out$BMI.pval));  ptt.t <- ""
+#o <- order(out$Composite_SeroConversion.pval)
+#o <- order(out$Composite_D28.pval)
+m <- out[o[1:num],"module"]
+
+# reshape
+tmp <-data.frame(trait.pcaSc)
+rownames(tmp) <- gsub("c1_", "M", tmp[,1])
+tmp[,-1] <- apply(tmp[,-1],2, as.numeric)
+#tmp <- tmp[o[1:num],]
+tmp <- tmp[m,]
+ttc <- reshape(tmp, idvar="V1", varying = list(names(tmp)[-1]), v.names="corr", timevar="Trait", times=names(tmp)[-1], direction = "long")
+#
+tmp <-data.frame(trait.pcaSp)
+rownames(tmp) <- gsub("c1_", "M", tmp[,1])
+tmp[,-1] <- apply(tmp[,-1],2, as.numeric)
+#tmp <- tmp[o[1:num],]
+tmp <- tmp[m,]
+colnames(tmp)[1] <- "V1"
+ttp <- reshape(tmp, idvar="V1", varying = list(names(tmp)[-1]), v.names="corr", timevar="Trait", times=names(tmp)[-1], direction = "long")
+#
+tmp <-data.frame(trait.pcaSq)
+rownames(tmp) <- gsub("c1_", "M", tmp[,1])
+tmp[,-1] <- apply(tmp[,-1],2, as.numeric)
+#tmp <- tmp[o[1:num],]
+tmp <- tmp[m,]
+colnames(tmp)[1] <- "V1"
+ttq <- reshape(tmp, idvar="V1", varying = list(names(tmp)[-1]), v.names="corr", timevar="Trait", times=names(tmp)[-1], direction = "long")
+tt <- cbind(ttc, pval=ttp[,3], qval=ttq[,3])
+
+tt <- tt[-grep("Corrected",tt$Trait),]             # remove "CorrectedSeroconversion"
+tt[tt$Trait=="Composite_SeroConversion","Trait"] <- "Seroconversion"
+tt[tt$Trait=="Composite_Baseline","Trait"] <- "Baseline HAI"
+tt[tt$Trait=="Composite_D28","Trait"] <- "Response HAI"
+tt$V1 <- gsub("c1_", "M", tt$V1)
+```
+
+### Preprocessed traits as alternative source without re-calculation
+
+```{r}
+#tt1: rnaseq-merged-counts_Matt_all_logCPM_RunIDMonthVacAdj_FDR0.05_trait_long.tsv")
+#tt2: rnaseq-merged-counts_Matt_all_logCPM_RunIDMonthVacAdj_FDR0.05_avLog2Sero_long.tsv")
+
+tt <- rbind (tl1, tl2)
+```
+
+
+### filter desired traits and modules
+
+```{r}
+num <- 10  # # to display
+# Careful! some out columns are not numeric!
+o <- order(out$avSero.rnk); ptt.t <- ""
+m <- out[o[1:num],"module"]
+
+ix <- which(!is.na(match(tt$V1, m)))
+tt <- tt[ix,]
+
+tt <- tt[-grep("omposite",tt$Trait),]             # remove all composite traits
+tt[tt$Trait=="average_log2SC","Trait"] <- "Seroconversion"
+tt[tt$Trait=="average_log2Baseline","Trait"] <- "Baseline HAI"
+tt[tt$Trait=="average_log2D28","Trait"] <- "Response HAI"
+
+```
+
+
+### Draw combined DEG enrichment and correlation plot
+
+```{r,fig.height=5,fig.width=8}
+ptt <- ggplot(tt, aes(x=factor(Trait, levels=c("Age", "BMI", "Baseline HAI", "Response HAI", "Seroconversion")), y=factor(V1, levels=rev(m)))) +
+  geom_point(aes(size=-log10(pval), color=corr)) + 
+  scale_color_distiller(palette="RdYlBu", direction = -1, limits=c(-.5,.5)) + theme_bw() + 
+  labs(x="Traits", y="Modules", title=ptt.t, size="-log10(P)") +
+  theme(text = element_text(size = 14), title= element_text(size = 12), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+####
+# use module enrich file
+#tmp <- out[o[1:num],]
+rownames(out) <- out$module
+#tmp <- out[o[1:num],c(3,5:15)]
+#tmp <- out[m,c(3,5:15)]  # old table
+tmp <- out[m, c(4,6:16,54:56)]   # all trait DEG enrichments
+
+tl <- reshape(tmp, idvar="module", varying = list(names(tmp)[-1]), v.names="pval", timevar="Trait", times=names(tmp)[-1], direction = "long")
+tl <- tl[-grep("omposite",tl$Trait),]             # remove composite type traits
+tl <- tl[tl$Trait!="Run.ID",]                      # remove "Run.ID"
+tl <- tl[tl$Trait!="Race_Ethnicity",]               
+tl <- tl[tl$Trait!="Month.vaccinated",]              
+tl[tl$Trait=="av..Seroconversion","Trait"] <- "Seroconversion"
+tl[tl$Trait=="av..Comp..Baseline","Trait"] <- "Baseline HAI"
+tl[tl$Trait=="av..Comp..Response","Trait"] <- "Response HAI"
+
+ptl <- ggplot(tl, aes(x=factor(Trait, levels=c("Age", "BMI", "Gender", "Prevacc.naive", "Baseline HAI", "Response HAI", "Seroconversion")), y=factor(module, levels=rev(m)), fill=-log10(as.numeric(pval)))) + 
+  geom_tile() + scale_fill_distiller(palette="YlOrRd", direction = 1) + 
+  labs(x="Traits", y="Modules", title="", fill="-log10(P)") +
+  theme(text = element_text(size = 14), title= element_text(size = 12), axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+ePlot <- list(ptl, ptt)
+
+plot_grid(plotlist=ePlot, ncol=2, nrow=1)
+```
+
+
+# GSEA
+
+## Download human annotations for GSEA
+
+```{r}
+require(DGCA)   # actually should get on top of markdown file.
+organism = "org.Hs.eg.db"
+#BiocManager::install(organism, character.only = TRUE)
+library(organism, character.only = TRUE)
+```
+
+## Create gene list ranked by Spearman correlation
+
+```{r}
+gs <- intersect(colnames(geno.xT), y$c1_198)
+x.modT <- geno.xT[, gs]   # select the corresponding genes from module
+corr <- cor(x.modT, trait$Composite_SeroConversion, method="spearman")
+
+corr <- corr[order(-corr[,1]),]
+gene.list <- corr
+```
+
+
+
+# Rund DGCA on select modules
+
+```{r}
+# do some c1_x <-> M* module name translation back and forth
+m1 <- gsub("M", "c1_", m)
+b.tbl <- List2Mod(b[m1])
+b.tbl$Module <- gsub("c1_", "M", b.tbl$Module)
+
+moduleGO_res <- moduleGO(genes=b.tbl$Values, labels=b.tbl$Module, universe=unique(genes[rnaseq.all.logCPM$X,"hgnc_symbol"]), pval_GO_cutoff = 0.05)
+
+```
+
+
+# Plot moduleGO results
+
+```{r,fig.height=10,fig.width=10}
+moduleGO_df <- extractModuleGO(moduleGO_res)
+# shorten GO names
+t2 <- strsplit(moduleGO_df$Term," ")
+t3 <- unlist(lapply(t2,function(x) {p<-c(x[1:3],ifelse(length(x)>3,x[length(x)],""));
+      ix<-which(is.na(p));if(length(ix)>0) {p<-p[1:(min(ix)-1)]};paste(p,collapse = " ")}))
+moduleGO_df2 <- moduleGO_df
+moduleGO_df2$Term <- t3 
+
+# restrict P-value
+moduleGO_df_le50 <- moduleGO_df2
+moduleGO_df_le50[,grep("Val", colnames(moduleGO_df_le50))] <- apply(moduleGO_df_le50[,grep("Val", colnames(moduleGO_df_le50))], 2, function(x) ifelse(x<1e-50,1e-50,x))
+
+moduleGO_df_le20 <- moduleGO_df2
+moduleGO_df_le20[,grep("Val", colnames(moduleGO_df_le20))] <- apply(moduleGO_df_le20[,grep("Val", colnames(moduleGO_df_le20))], 2, function(x) ifelse(x<1e-20,1e-20,x))
+
+
+pmGO <- plotModuleGO(moduleGO_df_le20, nTerms = 3, text_size = 10, coord_flip = T)
+
+```
+
+
+
+# Combine plots for Fig. 4
+
+```{r,fig.height=12.5,fig.width=10.5}
+p1 <- plot_grid(ptl, ptt, NULL, NULL, NULL, NULL, nrow =2, rel_heights = c(1.9,3), labels=c("A", "B", "C", "D", "", "E"))
+
+ggdraw(p1) +
+  draw_image("Fig4part3.png", x=.66, y=.34, width=0.31 ) +
+  draw_image("MEGENA/M387a.png", x=.04, y=-0.1, width=0.545) +
+  draw_plot(pmGO, x = .59, y=0.12, width=0.5, height = 0.4) +
+  draw_image("color_scale.png", x=.1, y=-.3, width=.25) +
+  draw_text("M387", x=.44, y=.31)
+ggsave("Fig_4.png", height = 12.5, width = 10.5)
+ggsave("Fig_4.pdf", height = 12.5, width = 10.5)
+```
+
+
+# Combine plots for Fig. S15 (Age dependence)
+
+```{r,fig.height=12.5,fig.width=10.5}
+p1 <- plot_grid(ptl, ptt, NULL, NULL, NULL, NULL, nrow =2, rel_heights = c(2.1,3), labels=c("A", "B", "D", "C", "", "E"))
+
+ggdraw(p1) +
+  draw_plot(pmGO, x=0.09, y=0.03, width=0.55, height=0.5) +
+  draw_image("MEGENA/M91.png", x=.66, y=.3, width=0.35 ) +
+  draw_image("MEGENA/M505.png", x = 1,
+    hjust = 1, halign = 1, valign = .2, width=0.32 ) +
+  draw_text("M91", x=.96, y=.8) +
+  draw_text("M505", x=.7, y=.51)
+ggsave("Fig_S15.png", height = 12.5, width = 10.5)
+ggsave("Fig_S15.pdf", height = 12.5, width = 10.5)
+```
+
+
+# Combine plots for Fig. S16 (BMI dependence)
+
+```{r,fig.height=12.5,fig.width=10.5}
+p1 <- plot_grid(ptl, ptt, NULL, NULL, NULL, NULL, nrow =2, rel_heights = c(2.1,3), labels=c("A", "B", "D", "C", "", "E"))
+
+ggdraw(p1) +
+  draw_plot(pmGO, x=0.06, y=0.03, width=0.57, height=0.5) +
+  draw_image("MEGENA/M47.png", x=.7, y=.3, width=0.3 ) +
+  draw_image("MEGENA/M76.png", x = 1,
+    hjust = 1, halign = 1, valign = .3, width=0.39 ) +
+  draw_text("M47", x=.72, y=.8) +
+  draw_text("M76", x=.91, y=.56) 
+ggsave("Fig_S16.png", height = 12.5, width = 10.5)
+ggsave("Fig_S16.pdf", height = 12.5, width = 10.5)
+```
+
+
+
+

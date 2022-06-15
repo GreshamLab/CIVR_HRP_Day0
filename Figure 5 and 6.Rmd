@@ -1,0 +1,508 @@
+---
+title: "HAI Analysis Fig 6 and 7"
+author: "Matthew Chung"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Preanalysis
+## Load packages
+
+```{r,warning=FALSE,message = FALSE}
+library(biomaRt)
+# library(cowplot)
+# library(clusterProfiler)
+library(cowplot)
+# library(DESeq2)
+library(edgeR)
+library(egg)
+# library(enrichplot)
+library(ggplot2)
+# library(gprofiler2)
+library(matrixStats)
+# library(openxlsx)
+# library(pathview)
+library(pROC)
+library(reshape2)
+library(rlist)
+# library(see)
+library(splines)
+library(ggplotify)
+# library(SuperExactTest)
+# library(UpSetR)
+```
+
+## Load functions
+```{r}
+lm_eqn <- function(df){
+    m <- lm(df[,2] ~ df[,1], df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+```
+
+## Load upstream data
+```{r}
+load("../data.RData")
+
+metadata$log2sero <- log2(metadata$average_seroconversion)
+
+```
+
+## Set metadata covariates
+```{r}
+covar1 <- "log2sero"
+covar2 <- c("Age","Gender","BMI_Value","Prevacc.naive","D0_score_2cat")
+## covar2 <- c("Age","Gender","BMI", "Race_Ethnicity","Month.vaccinated")
+```
+
+## Add metadata readout for categorizing average_seroconversion and day 0 serostatus
+```{r}
+metadata$seroconversion_2cat <- as.factor(ifelse(metadata$log2sero >= 2,"high","low"))
+metadata$D0_score_2cat <- as.factor(ifelse(metadata$Composite_Baseline >= 25, "high", "low"))
+
+sum(grepl("low", metadata$seroconversion_2cat))
+```
+
+# Create random forest with average_seroconversion DE genes to predict average_seroconversion category
+
+## Create container for Fig 5 and 6
+
+```{r}
+fig5 <- list()
+fig6 <- list()
+```
+
+## Run differential expression analysis
+
+```{r}
+FDR.cutoff <- 0.05
+
+degenes.edgeR <- list()
+
+for(j in 1:length(covar1)){
+  group <- metadata[,which(colnames(metadata) == covar1[j])]
+  if(length(unique(group)) > 10){
+    spline <- ns(group, df=1)
+    design <- model.matrix(~spline)
+  }else{
+    design <- model.matrix(formula(paste("~",covar1[j])),data = metadata)
+  }
+  
+  y <- DGEList(counts=counts.subset,
+               group=group)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+  
+  qlf <- glmQLFTest(fit,coef=2:(ncol(design)))
+  degenes <- topTags(qlf,n=Inf)
+  degenes.edgeR[[j]] <- rownames(degenes$table)[degenes@.Data[[1]]$FDR < FDR.cutoff]
+}
+names(degenes.edgeR) <- covar1
+```
+
+## Switch TPM rownames to gene names and subset by log2sero DE genes
+
+```{r}
+ensembl <- useEnsembl(biomart = "genes")
+ensembl <- useDataset(dataset = "hsapiens_gene_ensembl", mart = ensembl)
+biomart <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+                filters = 'ensembl_gene_id',
+                values = degenes.edgeR$log2sero, 
+                mart = ensembl)
+biomart[,2] <- ifelse(biomart[,2] == "" | biomart[,2] == "Metazoa_SRP",biomart[,1],biomart[,2])
+tpm.subset <- tpm.subset[degenes.edgeR$log2sero,]
+rownames(tpm.subset) <- biomart[match(rownames(tpm.subset),biomart[,1]),2]
+```
+
+## Create random forest model
+
+### Split data into training and testing sets
+
+```{r}
+seeds <- c(80:89)
+rf.alldata <- list(metadata=as.data.frame(metadata[match(colnames(tpm.subset),metadata$File.Name),covar2]),
+                   rnaseq=t(tpm.subset),
+                   both=as.data.frame(cbind(metadata[match(colnames(tpm.subset),metadata$File.Name),covar2],
+                                            t(tpm.subset))))
+
+rf.traindata <- list()
+rf.testdata <- list()
+
+library(caTools)
+for(i in 1:length(rf.alldata)){
+  rf.traindata[[i]] <- list()
+  rf.testdata[[i]] <- list()
+  for(j in 1:length(seeds)){
+    set.seed(seeds[j])
+    sample = sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    rf.traindata[[i]][[j]] = rf.alldata[[i]][sample == T,]
+    rf.testdata[[i]][[j]]  = rf.alldata[[i]][sample == F,]
+  }
+}
+names(rf.traindata) <- names(rf.alldata)
+names(rf.testdata) <- names(rf.alldata)
+```
+    
+### Tune random forest model for optimal number of variables sampled at each split
+
+```{r,warning=FALSE,message = FALSE}
+rf.mdl <- list()
+
+library(randomForest)
+for(i in 1:length(rf.alldata)){
+  rf.mdl[[i]] <- list()
+  for(j in 1:length(seeds)){
+    set.seed(seeds[j])
+    sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    set.seed(seeds[j])
+    mtry <- tuneRF(x = rf.traindata[[i]][[j]],
+                   y = metadata$seroconversion_2cat[sample == T],
+                   mtryStart=round(ncol(rf.traindata[[i]][[j]])/3),
+                   ntreeTry=500,
+                   stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+    best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+  
+    set.seed(seeds[j])
+    sample = sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    set.seed(seeds[j])
+    rf.mdl[[i]][[j]] <-randomForest(x = rf.traindata[[i]][[j]],
+                                y = metadata$seroconversion_2cat[sample == T],
+                                mtry=best.m,
+                                ntree=500,
+                                proximity =T,
+                                importance = T)
+  }
+}
+```
+
+### Plot average OOB error
+
+```{r,fig.height=3,fig.width=6}
+colorsx <- c("#C988EE","#A3F38D","#8DE5F3")
+
+oob.error <- as.data.frame(rbind(cbind("Metadata",
+                                       unlist(lapply(rf.mdl[[1]],function(x){x$err.rate[500,1]}))),
+                                 cbind("average_seroconversion DE genes",
+                                       unlist(lapply(rf.mdl[[2]],function(x){x$err.rate[500,1]}))),
+                                 cbind("Metadata + average_seroconversion DE genes",
+                                       unlist(lapply(rf.mdl[[3]],function(x){x$err.rate[500,1]})))))
+
+plot.df <- oob.error
+
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+plot.df[,1] <- factor(plot.df[,1],levels=c("Metadata","average_seroconversion DE genes","Metadata + average_seroconversion DE genes"))
+labels <- c(rep("Physiological Data", 10), rep("Seroconversion DE Genes", 10), rep("Physiological Data + Seroconversion DE Genes", 10))
+plot.df$labels <- labels
+
+
+oob.plot <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[,2],
+                     y=!!plot.df[,3]),
+                 fill=colorsx,
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[,2],
+                  y=!!plot.df[,3]))+
+    labs(x="OOB estimate of error rate",y="")+
+    theme_bw()
+
+fig5$a <- oob.plot
+
+fig5$a
+
+```
+
+### Plot boxplot of AUC values from ROC curves
+
+```{r,fig.height=3,fig.width=6}
+auc <- c()
+for(i in 1:length(rf.mdl)){
+  for(j in 1:length(rf.mdl[[i]])){
+    set.seed(seeds[j])
+    sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    # rocobj <- roc(metadata$seroconversion_2cat[sample == F],
+    #               predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1],
+    #               smooth=T)
+    auc <- c(auc,
+             auc(metadata$seroconversion_2cat[sample == F],
+                  predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1]))
+  }
+}
+plot.df <- as.data.frame(cbind(c(rep("Metadata",10),
+                                 rep("average_seroconversion DE Genes",10),
+                                 rep("Metadata + average_seroconversion DE Genes",10)),
+                               auc))
+
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+plot.df[,1] <- factor(plot.df[,1],levels=c("Metadata","average_seroconversion DE Genes","Metadata + average_seroconversion DE Genes"))
+auc.boxplot <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[,2],
+                     y=!!plot.df[,1]),
+                 fill=colorsx,
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[,2],
+                  y=!!plot.df[,1]))+
+    labs(x="AUC",y="")+
+    theme_bw()
+
+fig5$b <- auc.boxplot
+
+
+```
+
+### Plot confusion matrices
+
+```{r,fig.height=5,fig.width=15}
+reduceApplyListOfArrays<- function(x){
+     y<-apply(array(unlist(x), c(dim(x[[1]]), dim(x[[2]]), length(x))), 
+              c(1,2), mean)
+     colnames(y)<-colnames(x[[1]])
+     rownames(y)<-rownames(x[[1]])
+  return(y)
+}
+
+confusion_matrix_plots.list <- list()
+
+titles <- c("Physiological Data", "Expression Data", "Physiological + Expression Data")
+
+for(i in 1:length(rf.mdl)){
+  matrix.list <- lapply(rf.mdl[[i]],function(x){return(x$confusion)})
+  
+  plot.df <- melt(reduceApplyListOfArrays(matrix.list)[1:2,1:2])
+  
+  plot.df[,1] <- factor(plot.df[,1],levels=c("low","high"))
+  plot.df[,2] <- factor(plot.df[,2],levels=c("low","high"))
+  
+  confusion_matrix_plots.list[[i]] <- ggplot(plot.df , aes(x = Var2, y = Var1, fill = value)) +
+    geom_tile(color = "white",
+              lwd = 1.5,
+              linetype = 1) +
+    geom_text(aes(label = paste0(value,"\n",round(value/sum(value)*100,2),"%")), color = "black", size = 4) +
+    scale_fill_gradient2(low = "#075AFF",
+                         mid = "#FFFFCC",
+                         high = "#FF0000") +
+    labs(x="predicted values",y="actual values",fill="", title = titles[i])+
+    theme_minimal() +
+    coord_fixed()
+}
+
+egg::ggarrange(plots=confusion_matrix_plots.list,
+          labels = c("A","B","C"),
+          ncol=3)
+fig5$c <- confusion_matrix_plots.list
+
+fig5$c
+
+
+```
+
+### Plot ROC curves
+
+```{r,fig.height=5,fig.width=10}
+roc.list <- list()
+auc <- c()
+for(i in 1:length(rf.mdl)){
+  roc.df <- as.data.frame(matrix(nrow=0,
+                                 ncol=2))
+  
+  for(j in 1:length(rf.mdl[[i]])){
+    set.seed(seeds[j])
+    sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    roc.df <- as.data.frame(rbind(roc.df,
+                                  cbind(metadata$seroconversion_2cat[sample == F],
+                                        predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1])))
+    # ,emetadata$seroconversion_2cat[sample == F],
+    #                      predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1],
+    #                      smooth=T)
+  }
+  roc.list[[i]] <- roc(roc.df[,1],roc.df[,2],smooth=T)
+  auc[i] <- round(auc(roc.df[,1],roc.df[,2]),4)
+}
+
+ci.list <- lapply(roc.list, ci.se, specificities = seq(0, 1, l = 25))
+dat.ci.list <- lapply(ci.list, function(ciobj) 
+  data.frame(x = as.numeric(rownames(ciobj)),
+             lower = ciobj[, 1],
+             upper = ciobj[, 3]))
+
+p <- ggroc(roc.list) + 
+  theme_bw() + 
+  geom_abline(slope=1, intercept = 1, linetype = "dashed", alpha=0.7, color = "grey") + 
+  coord_equal()+
+  scale_color_manual(values=colorsx,labels=c(paste0("Metadata | AUC: ",auc[1]),
+                                            paste0("average_seroconversion DE Genes | AUC: ",auc[2]),
+                                            paste0("Metadata + average_seroconversion DE Genes | AUC: ",auc[3])))+
+  labs(color="RF Model")+
+  geom_line(size=1)
+
+for(i in 1:3) {
+  p <- p + geom_ribbon(
+    data = dat.ci.list[[i]],
+    aes(x = x, ymin = lower, ymax = upper),
+    fill = i + 1,
+    alpha = 0.2,
+    inherit.aes = F) 
+  } 
+
+p
+```
+
+
+
+
+### Plot random forest variable importance
+
+```{r,fig.height=8,fig.width=11}
+colors <- c("#C988EE","#A3F38D","#8DE5F3")
+
+acc_plots.list <- list()
+for(i in 1:length(rf.mdl)){
+  importance.df <- do.call(cbind,lapply(rf.mdl[[i]],function(x){return(x$importance)}))
+  rownames(importance.df) <- gsub("Gender","Sex",rownames(importance.df))
+  rownames(importance.df) <- gsub("BMI_Value","BMI",rownames(importance.df))
+  rownames(importance.df) <- gsub("Prevacc.naive","Previous Vaccination",rownames(importance.df))
+  rownames(importance.df) <- gsub("D0_score_2cat", "Baseline HAI", rownames(importance.df))
+  
+  acc.order <- rownames(importance.df)[order(-rowMeans(importance.df[,colnames(importance.df) == "MeanDecreaseAccuracy"]))]
+  gini.order <- rownames(importance.df)[order(-rowMeans(importance.df[,colnames(importance.df) == "MeanDecreaseGini"]))]
+  
+  if(i!=1){
+    acc.order <- acc.order[1:30]
+    gini.order <- gini.order[1:30]
+  }
+  
+  plot.df <- melt(importance.df)
+  plot.df <- plot.df[plot.df[,1] %in% acc.order,]
+  plot.df[,1] <- factor(plot.df[,1],levels=rev(acc.order))
+  
+  plot.acc <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",3],
+                     y=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",1]),
+                 fill=colors[i],
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",3],
+                   y=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",1]))+
+    labs(x="MeanDecreaseAccuracy",y="")+
+    theme_bw()
+  
+  plot.df <- melt(importance.df)
+  plot.df <- plot.df[plot.df[,1] %in% gini.order,]
+  plot.df[,1] <- factor(plot.df[,1],levels=rev(gini.order))
+
+  plot.gini <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseGini",3],
+                     y=!!plot.df[plot.df[,2] == "MeanDecreaseGini",1]),
+                 fill=colors[i],
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseGini",3],
+                   y=!!plot.df[plot.df[,2] == "MeanDecreaseGini",1]))+
+    labs(x="Mean Decrease Gini",y="")+
+    theme_bw()
+  
+   acc_plots.list <- list.append(acc_plots.list,
+                                 plot.acc,
+                                 plot.gini)
+   
+}
+
+acc_plots.list
+
+
+
+fig6ab <- plot_grid(acc_plots.list[[1]], acc_plots.list[[2]],nrow=1, labels = c("A", "B"))
+
+fig6cde <- plot_grid(acc_plots.list[[3]], acc_plots.list[[4]], acc_plots.list[[5]], acc_plots.list[[6]],
+                     nrow = 1,
+                     labels = c("C", "D", "E", "F"))
+
+pdf("fig6.pdf",
+    height=8,
+    width=13)
+plot_grid(fig6ab, fig6cde, ncol = 1, rel_heights = c(1, 3))
+dev.off()
+
+
+fig6 <- acc_plots.list
+
+png("fig6.png",
+    height=3000,
+    width=4000,
+    units = "px",
+    res = 300)
+plot_grid(fig6ab, fig6cde, ncol = 1, rel_heights = c(1, 3))
+dev.off()
+
+```
+
+### Run crossvalidation for random forest
+
+```{r,fig.height=5,fig.width=5}
+library(rfUtilities)
+
+fig5$d <- list()
+for(i in 1:length(rf.mdl)){
+  set.seed(86)
+  rf.cv <- rfcv(trainx = rf.alldata[[i]], 
+                trainy = metadata$seroconversion_2cat, 
+                mtryStart=round(ncol(rf.alldata[[i]])/3),
+                cv.fold=10)
+  plot <- ggplot(mapping=aes(x=!!rf.cv$n.var,
+                                         y=!!rf.cv$error.cv))+
+                            geom_point(color=colors[i],size=2)+
+                            geom_line(color=colors[i],size=1)+
+                            labs(x="Number of Variables",y="Cross Validation Error")+
+                            scale_x_continuous(trans="log10")+
+                            theme_bw()
+  fig5$d[[i]] <- plot
+}
+```
+
+# Print figures in Fig 5
+```{r,fig.height=8,fig.width=11}
+fig5ab <- plot_grid(fig5$a,fig5$b+theme(axis.text.y = element_blank()),nrow=1, labels = c('A', 'B'))
+fig5c <- egg::ggarrange(fig5$c[[1]],fig5$c[[2]],fig5$c[[3]],nrow=1)
+fig5d <- egg::ggarrange(fig5$d[[1]],fig5$d[[2]],fig5$d[[3]],nrow=1)
+
+pdf("fig5.pdf",
+    height=8,
+    width=11)
+
+
+plot_grid(fig5ab, fig5c, fig5d,
+          rel_heights = c(1, 2, 2),
+          labels = c('', "C", "D"),
+          ncol = 1)
+dev.off()
+
+png("fig5.png",
+    height = 3000,
+    width = 4000,
+    units = "px",
+    res = 300)
+
+plot_grid(fig5ab, fig5c, fig5d,
+          rel_heights = c(1, 2, 2),
+          labels = c('', "C", "D"),
+          ncol = 1)
+dev.off()
+```
+
+# Print figures in Fig 7
+
+```{r,fig.height=8,fig.width=20}
+egg::ggarrange(plots = fig6$e,
+          nrow=1)
+```
