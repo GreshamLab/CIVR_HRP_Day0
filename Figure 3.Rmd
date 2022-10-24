@@ -1,0 +1,1248 @@
+---
+title: "Differential Expression Analysis of Day 0 Samples - Covariate Analysis"
+author: "Megan Hockman"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(biomaRt)
+library(cowplot)
+library(clusterProfiler)
+# library(DESeq2)
+library(edgeR)
+library(enrichplot)
+library(gameofthrones)
+library(ggpubr)
+library(GOSemSim)
+library(ggplot2)
+library(ggridges)
+# library(gprofiler2)
+# library(openxlsx)
+# library(pathview)
+library(reshape2)
+# library(see)
+library(splines)
+# library(SuperExactTest)
+library(UpSetR)
+library(png)
+library(ggpubr)
+library(dplyr)
+library(stringr) 
+library(grid)
+library(extrafont)
+library(extrafontdb)
+```
+
+###Load the Data
+```{r}
+load("../data.RData")
+
+metadata$log2sero <- as.numeric(log2(metadata$average_seroconversion))
+metadata$log2baseline <- as.numeric(log2(metadata$Composite_Baseline))
+
+```
+
+Add a metadata column for age ranges
+```{r}
+sort(unique(metadata$Age))
+metadata <- metadata %>% mutate(Agerange = ifelse(Age <= 30, "18-30",
+                           ifelse(Age <=60, "30 - 60", "60-85")))
+
+metadata$bmibivar<- ifelse(metadata$BMI_Value < 25, "Normal", "Overweight")
+
+```
+
+
+```{r}
+covariates <- list(log2sero=c("Age","Gender","BMI_Value"),
+               log2baseline=c("Age","Gender", "BMI_Value")) 
+fig3 <- list()
+
+write.csv(counts.subset, file = "rawcounts_subset.csv", row.names = TRUE)
+
+```
+
+```{r}
+FDR.cutoff <- 0.05
+
+degenes.edgeR <- list(log2sero=c(),
+                      log2baseline=c())
+degenes.edgeR.coeff <- list(log2sero=c(),
+                            log2baseline=c())
+toptags <- list(log2sero=c(),
+                log2baseline=c())
+    
+for(i in 1:length(degenes.edgeR)){
+  ref.var <- names(degenes.edgeR)[i]
+  sero.group <- metadata[,which(colnames(metadata) == ref.var)]
+  
+  for(j in 1:length(covariates[[i]])){
+    group <- metadata[,which(colnames(metadata) == covariates[[i]][[j]])]
+    design <- model.matrix(~sero.group:group)
+    
+    y <- DGEList(counts = counts.subset,
+                 group = group)
+    keep <- filterByExpr(y)
+    y <- y[keep, ,keep.lib.sizes = F]
+    y <- calcNormFactors(y, method = "TMM")
+    y <- estimateDisp(y, design, robust = TRUE)
+    fit <- glmQLFit(y, design, robust = TRUE)
+    qlf <- glmQLFTest(fit, coef = grep(":", colnames(design))[1]:(ncol(design)))
+    
+    degenes <- topTags(qlf, n = Inf)
+    toptags[[i]][[j]] <- degenes
+    
+    degenes.edgeR[[i]][[j]] <- rownames(degenes$table)[degenes@.Data[[1]]$FDR < FDR.cutoff]
+    degenes.edgeR.coeff[[i]][[j]] <- qlf$coefficients
+    
+    
+  }
+  names(degenes.edgeR[[i]]) <- covariates[[i]]
+  names(degenes.edgeR.coeff[[i]]) <- covariates[[i]]
+  names(toptags[[i]]) <- covariates[[i]]
+}
+```
+
+
+
+
+```{r}
+names(degenes.edgeR[[1]]) <- c("Age", "Sex", "BMI")
+names(degenes.edgeR[[2]]) <- c("Age", "Sex", "BMI")
+
+fig3$a <- upset(fromList(degenes.edgeR[[1]]), 
+                order.by = "freq",
+                nsets = length(covariates[[1]]),
+                nintersects = 9,
+                text.scale = 5,
+                point.size = 6,
+                line.size = 1,
+                mainbar.y.label = "Intersection Size", 
+                sets.x.label = "Differentially\nExpressed Genes",
+                set_size.show = TRUE) 
+
+
+fig3$a
+
+pdf(paste0("fig3a.pdf"),
+    height=15,
+    width=30)
+fig3$a
+grid.text("Seroconversion", x = 0.65, y = 0.95,
+              gp = gpar(fontsize = 40))
+dev.off()
+
+png(paste0("fig3a.png"),
+    height=15,
+    width=30,
+    units = "in",
+    res = 300)
+fig3$a
+grid.text("Seroconversion", x = 0.65, y = 0.95,
+              gp = gpar(fontsize = 40))
+dev.off()
+
+fig3$b <- upset(fromList(degenes.edgeR[[2]]), 
+                order.by = "freq",
+                nsets = length(covariates[[2]]),
+                nintersects = 9,
+                text.scale = 5,
+                point.size = 6,
+                line.size = 1,
+                mainbar.y.label = "Intersection Size", 
+                sets.x.label = "Differentially\nExpressed Genes",
+                set_size.show = TRUE
+                ) 
+
+
+fig3$b
+
+pdf(paste0("fig3b.pdf"),
+    height=15,
+    width=30)
+fig3$b
+grid.text("Baseline HAI", x = 0.65, y = 0.95,
+              gp = gpar(fontsize = 40))
+dev.off()
+
+png(paste0("fig3b.png"),
+    height=15,
+    width=30,
+    units = "in",
+    res = 300)
+fig3$b
+grid.text("Baseline HAI", x = 0.65, y = 0.95,
+              gp = gpar(fontsize = 40))
+dev.off()
+
+```
+Export TopTags Tables
+```{r}
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+toptagsexp <- list(toptags[[2]][[3]], toptags[[1]][[3]])
+
+
+for(j in 1:length(toptagsexp)){
+  genenames <- as.data.frame(matrix(nrow = nrow(toptagsexp[[j]]$table),
+                                 ncol = 2))
+  geneids <- rownames(!!toptagsexp[[j]]$table)
+  genenames <- as.data.frame(getBM(filters= "ensembl_gene_id", 
+                  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                  values=geneids,
+                  mart= mart))
+  toptagsexp[[j]]$table$hgnc <- genenames$hgnc_symbol[match(rownames(toptagsexp[[j]]$table), genenames$ensembl_gene_id)]
+  print(j)
+}
+
+toptagsexp[[2]]
+
+write.csv(toptagsexp[[1]]$table, file = "TopTags_baselineHAI_BMI.csv", row.names = TRUE)
+
+write.csv(toptagsexp[[2]]$table, file = "TopTags_SeroConversion_BMI.csv", row.names = TRUE)
+
+```
+
+Plot differential expression of Baseline HAI:BMI
+```{r}
+genes <- toptags[[2]][[3]]$table
+genes <- genes[genes$FDR < 0.05,]
+genes <- rownames(genes)
+
+log2tpm.genes <- log2(tpm.subset[genes,])
+plot.df <- melt(as.matrix(log2tpm.genes))
+plot.df <- plot.df[plot.df[,3] != -Inf,]
+
+x <- dplyr::count(plot.df, vars = Var1)
+x <- filter(x, n > 50)
+genesig <- as.character(x$vars)
+log2tpm.genesig <- log2(tpm.subset[genesig,])
+plot.df <- melt(as.matrix(log2tpm.genesig))
+
+
+plot.df[,4] <- metadata$log2baseline[match(plot.df[,2], metadata$File.Name)]
+plot.df[,5] <- metadata$BMI_Value[match(plot.df[,2], metadata$File.Name)]
+plot.df[,6] <- metadata$bmibivar[match(plot.df[,2], metadata$File.Name)]
+
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl", mirror = "useast")
+
+plot.list <- list()
+
+for(j in 1:10){
+  plot.df.subset <- plot.df[plot.df[,1] == genesig[j],]
+  
+  genelist <- getBM(filters= "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values=plot.df.subset$Var1,
+                  mart= mart)
+  
+  plot.df.subset$Var7 <- genelist$hgnc_symbol[match(plot.df.subset$Var1, genelist$ensembl_gene_id)]
+  if(is.na(plot.df.subset$Var7)){plot.df.subset$Var5 <- plot.df.subset$Var1[1]}
+  
+  plot.list[[j]] <- ggplot(data = plot.df.subset, aes(x = !!plot.df.subset[,4],
+                                                      y = !!plot.df.subset[,3],
+                                                      color = !!plot.df.subset[,6],
+                                                      group = !!plot.df.subset[,6])) +
+    geom_point() +
+    scale_color_discrete(name = "BMI Category") +
+    geom_smooth(method = "lm") +
+    guides(fill = 'none') +
+    labs(x = "Baseline HAI",
+         y = expression("log"[2]*TPM),
+         title = plot.df.subset[,7]) +
+    theme_bw()+
+    theme(plot.title = element_text(size = 10),
+          axis.text = element_text(size = 8),
+          axis.title = element_text(size = 10),
+          aspect.ratio = 1)
+  
+}
+
+plot.list
+
+png(paste0("figs11.png"),
+    height = 3000,
+    width = 2000,
+    units = 'px',
+    res = 300)
+plot_grid(plotlist = plot.list, ncol =2, align = 'hv')
+dev.off()
+
+pdf(paste0("figs11.pdf"),
+    height = 15,
+    width = 7.5)
+plot_grid(plotlist = plot.list, ncol = 2, align = 'hv')
+dev.off()
+
+```
+Plot differential expression of Seroconversion:BMI
+```{r}
+genes <- toptags[[1]][[3]]$table
+genes <- genes[genes$FDR < 0.05,]
+genes <- rownames(genes)
+
+log2tpm.genes <- log2(tpm.subset[genes,])
+
+plot.df <- melt(as.matrix(log2tpm.genes))
+plot.df <- plot.df[plot.df[,3] != -Inf,]
+x <- dplyr::count(plot.df, vars = Var1)
+x <- filter(x, n > 50)
+
+genesig <- as.character(x$vars)
+log2tpm.genesig <- log2(tpm.subset[genesig,])
+plot.df <- melt(as.matrix(log2tpm.genesig))
+
+
+plot.df[,4] <- metadata$log2sero[match(plot.df[,2], metadata$File.Name)]
+plot.df[,5] <- metadata$BMI_Value[match(plot.df[,2], metadata$File.Name)]
+plot.df[,6] <- metadata$bmibivar[match(plot.df[,2], metadata$File.Name)]
+
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl", mirror = "useast")
+
+plot.list <- list()
+
+for(j in 1:10){
+  plot.df.subset <- plot.df[plot.df[,1] == genesig[j],]
+  plot.df.subset <- plot.df.subset[plot.df.subset[,3] != -Inf,]
+  
+  genelist <- getBM(filters= "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values=plot.df.subset$Var1,
+                  mart= mart)
+  
+  plot.df.subset$Var7 <- genelist$hgnc_symbol[match(plot.df.subset$Var1, genelist$ensembl_gene_id)]
+  if(is.na(plot.df.subset$Var7)){plot.df.subset$Var7 <- plot.df.subset$Var1[1]}
+  
+  plot.list[[j]] <- ggplot(data = plot.df.subset, aes(x = !!plot.df.subset[,4],
+                                                      y = !!plot.df.subset[,3],
+                                                      color = !!plot.df.subset[,6],
+                                                      group = !!plot.df.subset[,6])) +
+    scale_color_discrete(name = "BMI Category") +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    guides(fill = 'none') +
+    labs(x = "Seroconversion",
+         y = expression("log"[2]*TPM),
+         title = plot.df.subset[,7]) +
+    theme_bw()+
+    theme(plot.title = element_text(size = 10),
+          axis.text = element_text(size = 8),
+          axis.title = element_text(size = 10),
+          aspect.ratio = 1)
+  
+}
+
+plot.list
+
+png(paste0("figs12.png"),
+    height = 3000,
+    width = 2000,
+    units = 'px',
+    res = 300)
+plot_grid(plotlist = plot.list, ncol =2, align = 'hv')
+dev.off()
+
+pdf(paste0("figs12.pdf"),
+    height = 15,
+    width = 7.5)
+plot_grid(plotlist = plot.list, ncol = 2, align = 'hv')
+dev.off()
+```
+
+Plot representative DE genes with respect to Baseline HAI and BMI
+###Gene 1: KRT79
+###Gene 2: IGLV4-60
+
+```{r}
+names(degenes.edgeR[[2]]) <- covariates[[2]]
+
+genes <- c("ENSG00000185640","ENSG00000211639")
+
+log2tpm.genes <- log2(tpm.subset[genes,])
+
+plot.df <- melt(as.matrix(log2tpm.genes))
+
+plot.df[,4] <- metadata$log2baseline[match(plot.df[,2], metadata$File.Name)]
+plot.df[,5] <- metadata$BMI_Value[match(plot.df[,2], metadata$File.Name)]
+plot.df[,6] <- metadata$bmibivar[match(plot.df[,2], metadata$File.Name)]
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+plot.list <- list()
+for(j in 1:length(genes)){
+  plot.df.subset <- plot.df[plot.df[,1] == genes[j],]
+  plot.df.subset <- plot.df.subset[plot.df.subset[,3] != -Inf,]
+  
+  genelist <- getBM(filters= "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values=plot.df.subset$Var1,
+                  mart= mart)
+  
+  plot.df.subset$Var7 <- genelist$hgnc_symbol[match(plot.df.subset$Var1, genelist$ensembl_gene_id)]
+  if(is.na(plot.df.subset$Var7)){plot.df.subset$Var5 <- plot.df.subset$Var1[1]}
+  
+  plot.list[[j]] <- ggplot(data = plot.df.subset, aes(x = !!plot.df.subset[,4],
+                                                      y = !!plot.df.subset[,3],
+                                                      color = !!plot.df.subset[,6],
+                                                      group = !!plot.df.subset[,6])) +
+    geom_point() +
+    geom_smooth(method = "lm", aes(color = !!plot.df.subset[,6], fill = !!plot.df.subset[,6])) +
+    guides(fill = 'none') +
+    scale_color_viridis_d(name = "BMI Category")+
+    scale_fill_viridis_d() +
+    labs(x = "Baseline HAI",
+         y = expression("log"[2]*TPM),
+         title = plot.df.subset[,7]) +
+    theme_bw()+
+      theme(text = element_text(size = 20, family = "Arial"),
+          aspect.ratio = 1)
+  
+}
+
+fig3$c <- plot.list[[1]]
+fig3$d <- plot.list[[2]]
+
+pdf(paste0("fig3c.pdf"),
+    height=5,
+    width=8)
+fig3$c
+dev.off()
+
+pdf(paste0("fig3d.pdf"),
+    height=5,
+    width=8)
+fig3$d
+dev.off()
+
+png(paste0("fig3c.png"),
+    height=1200,
+    width=1700,
+    units = "px",
+    res = 300)
+plot(fig3$c)
+dev.off()
+
+png(paste0("fig3d.png"),
+    height=1200,
+    width=1700,
+    units = "px",
+    res = 300)
+plot(fig3$d)
+dev.off()
+```
+
+Plot representative DE genes with respect to Seroconversion and BMI
+
+```{r}
+names(degenes.edgeR[[1]]) <- covariates[[1]]
+
+genes <- c("ENSG00000146122","ENSG00000102109")
+
+log2tpm.genes <- log2(tpm.subset[genes,])
+
+plot.df <- melt(as.matrix(log2tpm.genes))
+
+plot.df[,4] <- metadata$log2sero[match(plot.df[,2], metadata$File.Name)]
+plot.df[,5] <- metadata$BMI_Value[match(plot.df[,2], metadata$File.Name)]
+plot.df[,6] <- metadata$bmibivar[match(plot.df[,2], metadata$File.Name)]
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+plot.list <- list()
+for(j in 1:length(genes)){
+  plot.df.subset <- plot.df[plot.df[,1] == genes[j],]
+  plot.df.subset <- plot.df.subset[plot.df.subset[,3] != -Inf,]
+  
+  genelist <- getBM(filters= "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values=plot.df.subset$Var1,
+                  mart= mart)
+  
+  plot.df.subset$Var7 <- genelist$hgnc_symbol[match(plot.df.subset$Var1, genelist$ensembl_gene_id)]
+  if(is.na(plot.df.subset$Var7)){plot.df.subset$Var5 <- plot.df.subset$Var1[1]}
+  
+  plot.list[[j]] <- ggplot(data = plot.df.subset, aes(x = !!plot.df.subset[,4],
+                                                      y = !!plot.df.subset[,3],
+                                                      color = !!plot.df.subset[,6],
+                                                      group = !!plot.df.subset[,6])) +
+    geom_point() +
+    geom_smooth(method = "lm", aes(color = !!plot.df.subset[,6], fill = !!plot.df.subset[,6])) +
+    guides(fill = 'none') +
+    scale_color_viridis_d(name = "BMI Category")+
+    scale_fill_viridis_d() +
+    labs(x = "Seroconversion",
+         y = expression("log"[2]*TPM),
+         title = plot.df.subset[,7]) +
+    theme_bw()+
+      theme(text = element_text(size = 20, family = "Arial"),
+          aspect.ratio = 1)
+  
+}
+
+plot.list
+
+fig3$e <- plot.list[[1]]
+fig3$f <- plot.list[[2]]
+
+pdf(paste0("fig3e.pdf"),
+    height=5,
+    width=8)
+fig3$e
+dev.off()
+
+pdf(paste0("fig3f.pdf"),
+    height=5,
+    width=8)
+fig3$f
+dev.off()
+
+png(paste0("fig3e.png"),
+    height=1200,
+    width=1700,
+    units = "px",
+    res = 300)
+plot(fig3$e)
+dev.off()
+
+png(paste0("fig3f.png"),
+    height=1200,
+    width=1700,
+    units = "px",
+    res = 300)
+plot(fig3$f)
+dev.off()
+```
+
+Perform GSEA Analysis : BMI
+```{r,warning=FALSE,message = FALSE}
+organism = "org.Hs.eg.db"
+#BiocManager::install(organism, character.only = TRUE)
+library(organism, character.only = TRUE)
+```
+
+This code generates a list of differentially expressed genes, ranked by FC, with respect to baseline HAI and BMI
+```{r}
+target.genes <- toptags[[2]][[3]]$table
+target.genes <- target.genes[target.genes$FDR < 0.05,]
+
+
+gene.list <- target.genes$logFC
+names(gene.list) <- rownames(target.genes)
+gene.list <-  sort(gene.list, decreasing = TRUE)
+```
+
+```{r}
+ontlist <- c("BP", "CC", "MF")
+simplist <- list()
+resultlist <- list()
+tib.list <- list()
+
+for (i in 1:length(ontlist)){
+  hsGO <- godata('org.Hs.eg.db', ont = ontlist[i])
+  set.seed(86)
+  gse <- gseGO(geneList=gene.list, 
+             ont = ontlist[i], 
+             keyType = "ENSEMBL", 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05,
+             verbose = TRUE, 
+             OrgDb = get(organism), 
+             pAdjustMethod = "none",
+             seed=T)
+  simp <- clusterProfiler::simplify(gse, 
+                                    semData = hsGO,
+                                    cutoff = 1)
+  simplist[[i]] <- simp
+  tib.list[[i]] <- as_tibble(simp@result)
+}
+
+gsea.diff.expression_HAI <- as_tibble(rbind(tib.list[[1]], tib.list[[2]], tib.list[[3]]))
+
+gsea.diff.expression_HAI$Description <- factor(gsea.diff.expression_HAI$Description, levels = gsea.diff.expression_HAI$Description[order(gsea.diff.expression_HAI$enrichmentScore)])
+
+fig3$g <- gsea.diff.expression_HAI %>%
+    #filter(p.adjust < 0.01) %>%
+    #filter(setSize > 6) %>%
+    ggplot(aes(enrichmentScore, Description, size = setSize)) +
+    geom_point(aes(fill = p.adjust, size = setSize), colour="black", pch=21) +
+    scale_fill_viridis_c(name = "P Value") +
+    labs(title = "Baseline HAI and BMI", x = "Enrichment Score") +
+    scale_size(name = "Gene Set Size", range = c(5, 25)) +
+    theme(text = element_text(size = 45, family = "Arial"),
+          legend.text = element_text(size = 45),
+          legend.key.height = unit(1, 'cm'),
+          axis.text.y = element_text(size = 45))
+
+fig3$g
+
+pdf(paste0("fig3g.pdf"),
+    height=30,
+    width=35)
+plot(fig3$g)
+dev.off()
+
+png(paste0("fig3g.png"),
+    height=4000,
+    width=10000,
+    units = "px",
+    res = 300)
+plot(fig3$g)
+dev.off()
+```
+
+
+This code generates a list of differentially expressed genes, ranked by FC, with respect to log2seroconversion and BMI
+```{r}
+target.genes <- toptags[[1]][[3]]$table
+target.genes <- target.genes[target.genes$FDR < 0.05,]
+
+
+
+gene.list <- target.genes$logFC
+names(gene.list) <- rownames(target.genes)
+gene.list <-  sort(gene.list, decreasing = TRUE)
+```
+
+Run GSEA of Seroconversion/BMI
+```{r}
+ontlist <- c("BP", "CC", "MF")
+simplist <- list()
+resultlist <- list()
+tib.list <- list()
+
+for (i in 1:length(ontlist)){
+  hsGO <- godata('org.Hs.eg.db', ont = ontlist[i])
+  set.seed(86)
+gse <- gseGO(geneList=gene.list, 
+             ont = ontlist[i], 
+             keyType = "ENSEMBL", 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05,
+             verbose = TRUE, 
+             OrgDb = get(organism), 
+             pAdjustMethod = "none",
+             seed=T)
+  simp <- clusterProfiler::simplify(gse, 
+                                    semData = hsGO,
+                                    cutoff = 0.4)
+  simplist[[i]] <- simp
+  tib.list[[i]] <- as_tibble(simp@result)
+}
+
+gsea.diff.expression_sero <- as_tibble(rbind(tib.list[[1]], tib.list[[2]], tib.list[[3]]))
+
+gsea.diff.expression_sero$Description <- factor(gsea.diff.expression_sero$Description, levels = gsea.diff.expression_sero$Description[order(gsea.diff.expression_sero$enrichmentScore)])
+
+
+fig3$h <- gsea.diff.expression_sero %>%
+    #filter(p.adjust < 0.001) %>%
+  filter(Description != "adaptive immune response based on somatic recombination of immune receptors built from immunoglobulin superfamily domains") %>%
+  filter(Description != "positive regulation of cysteine-type endopeptidase activity involved in apoptotic process") %>%
+    #filter(setSize > 6) %>%
+    ggplot(aes(enrichmentScore, Description, size = setSize)) +
+    geom_point(aes(fill = p.adjust, size = setSize), colour="black", pch=21) +
+  labs(title = "Seroconversion and BMI", x = "Enrichment Score") +
+    scale_fill_viridis_c(name = "P Value") +
+    scale_size(name = "Gene Set Size", range = c(5, 25)) +
+    theme(text = element_text(size = 45, family = "Arial"),
+          legend.text = element_text(size = 45),
+          legend.key.height = unit(1, 'cm'),
+          axis.text.y = element_text(size = 45))
+
+fig3$h
+
+pdf(paste0("fig3h.pdf"),
+    height=30,
+    width=35)
+plot(fig3$h)
+dev.off()
+
+png(paste0("fig3h.png"),
+    height=7000,
+    width=12000,
+    units = "px",
+    res = 300)
+plot(fig3$h)
+dev.off()
+```
+
+Generate paper figures
+```{r}
+fig3DiffExp <- ((fig3$c | fig3$d) / (fig3$e | fig3$f))
+
+pdf(paste0("fig3diffExp.pdf"),
+    height=20,
+    width=52)
+plot(fig3GSEA)
+dev.off()
+
+png(paste0("fig3diffExp.png"),
+    height=20,
+    width=52,
+    units = "in",
+    res = 300)
+plot(fig3GSEA)
+dev.off()
+
+fig3GSEA <- fig3$g + fig3$h
+
+pdf(paste0("fig3GSEA.pdf"),
+    height=20,
+    width=52)
+plot(fig3GSEA)
+dev.off()
+
+png(paste0("fig3GSEA.png"),
+    height=20,
+    width=52,
+    units = "in",
+    res = 300)
+plot(fig3GSEA)
+dev.off()
+
+
+```
+
+Plot all GSEA results in one plot
+```{r}
+gsea.diff.expression_HAI$group <- "HAI"
+gsea.diff.expression_sero$group <- "Seroconversion"
+
+gsea.diff.expression_all <- as_tibble(rbind(gsea.diff.expression_HAI, gsea.diff.expression_sero))
+
+gsea.diff.expression_all$Description <- factor(gsea.diff.expression_all$Description, levels = gsea.diff.expression_all$Description[order(gsea.diff.expression_all$enrichmentScore)])
+
+
+fig3_all <- gsea.diff.expression_all %>%
+  filter(Description != "positive regulation of cysteine-type endopeptidase activity involved in apoptotic process") %>%
+    ggplot(aes(enrichmentScore, Description, color = p.adjust, size = setSize)) +
+    geom_point() +
+  facet_grid(group~., scales = "free", space = "free")+
+    labs(x = "Enrichment Score",
+         y = "Biological Pathway",
+         title = "") +
+    scale_colour_viridis_c(name = "P Value") +
+  scale_size(name = "Gene Set Size") +
+    theme(text = element_text(size = 20)) 
+
+
+pdf(paste0("fig3g_all.pdf"),
+    height=13,
+    width=15)
+plot(fig3_all)
+dev.off()
+
+png(paste0("fig3g_all.png"),
+    height=13,
+    width=15,
+    units = "in",
+    res = 300)
+plot(fig3_all)
+dev.off()
+
+```
+
+
+From here on out, code will be optional - it creates plots and analyses of both baseline HAI and Seroconversion with respect to age and gender, rather than BMI which is shown in the paper.
+
+Perform GSEA: Using age as the covariate
+
+```{r,warning=FALSE,message = FALSE}
+organism = "org.Hs.eg.db"
+#BiocManager::install(organism, character.only = TRUE)
+library(organism, character.only = TRUE)
+```
+
+###This code generates a list of differentially expressed genes, ranked by spearman correlation coefficient, with respect to baseline HAI and age
+```{r}
+target.genes <- degenes.edgeR[[2]][[1]]
+
+gsea.counts <- counts.subset[rownames(counts.subset) %in% target.genes,]
+gsea.counts <- gsea.counts[,colSums(gsea.counts) != 0]
+
+y <- DGEList(counts=gsea.counts)
+log2tpm <- log2(tpm.subset)
+log2tpm <- log2tpm[rownames(log2tpm) %in% target.genes,]
+
+plot.df <- melt(as.matrix(log2tpm))
+plot.df[,4] <- metadata$Composite_Baseline[match(plot.df[,2],metadata$File.Name)]
+
+corr.df <- as.data.frame(matrix(nrow = length(unique(plot.df[,1])),
+                                ncol = 2))
+corr.df[,1] <- unique(plot.df[,1])
+
+for(i in 1:nrow(corr.df)){
+  plot.df.subset <- plot.df[plot.df[,1] == corr.df[i,1],]
+  corr.df[i,2] <- cor(plot.df.subset[,4],plot.df.subset[,3],method="spearman")
+}
+
+corr.df <- corr.df[order(-corr.df[,2]),]
+gene.list <- corr.df[,2]
+names(gene.list) <- corr.df[,1]
+
+print(length(gene.list))
+```
+
+
+```{r}
+ontlist <- c("BP", "CC", "MF")
+simplist <- list()
+resultlist <- list()
+tib.list <- list()
+
+for (i in 1:length(ontlist)){
+  hsGO <- godata('org.Hs.eg.db', ont = ontlist[i])
+  set.seed(86)
+  gse <- gseGO(geneList=gene.list, 
+             ont = ontlist[i], 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = get(organism), 
+             pAdjustMethod = "none",
+             seed=T)
+  simp <- clusterProfiler::simplify(gse, 
+                                    semData = hsGO,
+                                    cutoff = 0.7)
+  simplist[[i]] <- simp
+  tib.list[[i]] <- as_tibble(simp@result)
+}
+
+gsea.diff.expression_HAI_Age <- as_tibble(rbind(tib.list[[1]], tib.list[[2]], tib.list[[3]]))
+
+gsea.diff.expression_HAI_Age$Description <- factor(gsea.diff.expression_HAI_Age$Description, levels = gsea.diff.expression_HAI_Age$Description[order(gsea.diff.expression_HAI_Age$enrichmentScore)])
+
+fig3$i <- gsea.diff.expression_HAI_Age %>%
+    filter(p.adjust < 0.003) %>%
+    filter(setSize > 6) %>%
+    ggplot(aes(enrichmentScore, Description, size = setSize)) +
+    geom_point(aes(fill = p.adjust, size = setSize), colour="black", pch=21) +
+    scale_fill_viridis_c(name = "P Value") +
+    labs(title = "Baseline HAI and Age", x = "Enrichment Score") +
+    scale_size(name = "Gene Set Size", range = c(5, 25)) +
+    theme(text = element_text(size = 45),
+          legend.text = element_text(size = 30),
+          legend.key.height = unit(1, 'cm'))
+
+fig3$i
+
+pdf(paste0("fig3i_HAIGSEA.pdf"),
+    height=20,
+    width=22)
+plot(fig3$i)
+dev.off()
+
+
+```
+
+
+###This code generates a list of differentially expressed genes with respect to Seroconversion/Age
+```{r}
+target.genes <- degenes.edgeR[[1]][[1]]
+
+gsea.counts <- counts.subset[rownames(counts.subset) %in% target.genes,]
+gsea.counts <- gsea.counts[,colSums(gsea.counts) != 0]
+
+y <- DGEList(counts=gsea.counts)
+log2tpm <- log2(tpm.subset)
+log2tpm <- log2tpm[rownames(log2tpm) %in% target.genes,]
+
+plot.df <- melt(as.matrix(log2tpm))
+plot.df[,4] <- metadata$Composite_SeroConversion[match(plot.df[,2],metadata$File.Name)]
+
+corr.df <- as.data.frame(matrix(nrow = length(unique(plot.df[,1])),
+                                ncol = 2))
+corr.df[,1] <- unique(plot.df[,1])
+
+for(i in 1:nrow(corr.df)){
+  plot.df.subset <- plot.df[plot.df[,1] == corr.df[i,1],]
+  corr.df[i,2] <- cor(plot.df.subset[,4],plot.df.subset[,3],method="spearman")
+}
+
+corr.df <- corr.df[order(-corr.df[,2]),]
+gene.list <- corr.df[,2]
+names(gene.list) <- corr.df[,1]
+
+print(length(gene.list))
+```
+
+Run GSEA
+```{r}
+ontlist <- c("BP", "CC", "MF")
+simplist <- list()
+resultlist <- list()
+tib.list <- list()
+
+for (i in 1:length(ontlist)){
+  hsGO <- godata('org.Hs.eg.db', ont = ontlist[i])
+  set.seed(86)
+  gse <- gseGO(geneList=gene.list, 
+             ont = ontlist[i], 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = get(organism), 
+             pAdjustMethod = "none",
+             seed=T)
+  simp <- clusterProfiler::simplify(gse, 
+                                    semData = hsGO,
+                                    cutoff = 0.7)
+  simplist[[i]] <- simp
+  tib.list[[i]] <- as_tibble(simp@result)
+}
+
+gsea.diff.expression_sero_age <- as_tibble(rbind(tib.list[[1]], tib.list[[2]], tib.list[[3]]))
+
+gsea.diff.expression_sero_age$Description <- factor(gsea.diff.expression_sero_age$Description, levels = gsea.diff.expression_sero_age$Description[order(gsea.diff.expression_sero_age$enrichmentScore)])
+
+
+fig3$j <- gsea.diff.expression_sero_age %>%
+    filter(p.adjust < 0.0005) %>%
+    filter(setSize > 6) %>%
+    ggplot(aes(enrichmentScore, Description, size = setSize)) +
+    geom_point(aes(fill = p.adjust, size = setSize), colour="black", pch=21) +
+  labs(title = "Seroconversion and Age", x = "Enrichment Score") +
+    scale_fill_viridis_c(name = "P Value") +
+    scale_size(name = "Gene Set Size", range = c(5, 25)) +
+    theme(text = element_text(size = 45),
+          legend.text = element_text(size = 30),
+          legend.key.height = unit(1, 'cm'))
+
+pdf(paste0("fig3j_SeroGSEA.pdf"),
+    height=20,
+    width=25)
+plot(fig3$j)
+dev.off()
+
+
+fig3$j
+```
+
+Perform GSEA: Using age as the covariate
+
+```{r,warning=FALSE,message = FALSE}
+organism = "org.Hs.eg.db"
+#BiocManager::install(organism, character.only = TRUE)
+library(organism, character.only = TRUE)
+```
+
+###This code generates a list of differentially expressed genes, ranked by spearman correlation coefficient, with respect to baseline HAI and Gender
+```{r}
+target.genes <- degenes.edgeR[[2]][[2]]
+
+gsea.counts <- counts.subset[rownames(counts.subset) %in% target.genes,]
+gsea.counts <- gsea.counts[,colSums(gsea.counts) != 0]
+
+y <- DGEList(counts=gsea.counts)
+log2tpm <- log2(tpm.subset)
+log2tpm <- log2tpm[rownames(log2tpm) %in% target.genes,]
+
+plot.df <- melt(as.matrix(log2tpm))
+plot.df[,4] <- metadata$Composite_Baseline[match(plot.df[,2],metadata$File.Name)]
+
+corr.df <- as.data.frame(matrix(nrow = length(unique(plot.df[,1])),
+                                ncol = 2))
+corr.df[,1] <- unique(plot.df[,1])
+
+for(i in 1:nrow(corr.df)){
+  plot.df.subset <- plot.df[plot.df[,1] == corr.df[i,1],]
+  corr.df[i,2] <- cor(plot.df.subset[,4],plot.df.subset[,3],method="spearman")
+}
+
+corr.df <- corr.df[order(-corr.df[,2]),]
+gene.list <- corr.df[,2]
+names(gene.list) <- corr.df[,1]
+
+print(length(gene.list))
+```
+
+
+```{r}
+ontlist <- c("BP", "CC", "MF")
+simplist <- list()
+resultlist <- list()
+tib.list <- list()
+
+for (i in 1:length(ontlist)){
+  hsGO <- godata('org.Hs.eg.db', ont = ontlist[i])
+  set.seed(86)
+  gse <- gseGO(geneList=gene.list, 
+             ont = ontlist[i], 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = get(organism), 
+             pAdjustMethod = "none",
+             seed=T)
+  simp <- clusterProfiler::simplify(gse, 
+                                    semData = hsGO,
+                                    cutoff = 0.7)
+  simplist[[i]] <- simp
+  tib.list[[i]] <- as_tibble(simp@result)
+}
+
+gsea.diff.expression_HAI_sex <- as_tibble(rbind(tib.list[[1]], tib.list[[2]], tib.list[[3]]))
+
+gsea.diff.expression_HAI_sex$Description <- factor(gsea.diff.expression_HAI_sex$Description, levels = gsea.diff.expression_HAI_sex$Description[order(gsea.diff.expression_HAI_sex$enrichmentScore)])
+
+fig3$k <- gsea.diff.expression_HAI_sex %>%
+    filter(p.adjust < 0.0001) %>%
+    filter(setSize > 6) %>%
+    ggplot(aes(enrichmentScore, Description, size = setSize)) +
+    geom_point(aes(fill = p.adjust, size = setSize), colour="black", pch=21) +
+    scale_fill_viridis_c(name = "P Value") +
+    labs(title = "Baseline HAI and Sex", x = "Enrichment Score") +
+    scale_size(name = "Gene Set Size", range = c(5, 25)) +
+    theme(text = element_text(size = 45),
+          legend.text = element_text(size = 30),
+          legend.key.height = unit(1, 'cm'))
+
+fig3$k
+
+pdf(paste0("fig3k_HAIGSEA.pdf"),
+    height=20,
+    width=22)
+plot(fig3$k)
+dev.off()
+
+
+```
+
+
+###This code generates a list of differentially expressed genes with respect to Seroconversion/Gender
+```{r}
+target.genes <- degenes.edgeR[[1]][[2]]
+
+gsea.counts <- counts.subset[rownames(counts.subset) %in% target.genes,]
+gsea.counts <- gsea.counts[,colSums(gsea.counts) != 0]
+
+y <- DGEList(counts=gsea.counts)
+log2tpm <- log2(tpm.subset)
+log2tpm <- log2tpm[rownames(log2tpm) %in% target.genes,]
+
+plot.df <- melt(as.matrix(log2tpm))
+plot.df[,4] <- metadata$Composite_SeroConversion[match(plot.df[,2],metadata$File.Name)]
+
+corr.df <- as.data.frame(matrix(nrow = length(unique(plot.df[,1])),
+                                ncol = 2))
+corr.df[,1] <- unique(plot.df[,1])
+
+for(i in 1:nrow(corr.df)){
+  plot.df.subset <- plot.df[plot.df[,1] == corr.df[i,1],]
+  corr.df[i,2] <- cor(plot.df.subset[,4],plot.df.subset[,3],method="spearman")
+}
+
+corr.df <- corr.df[order(-corr.df[,2]),]
+gene.list <- corr.df[,2]
+names(gene.list) <- corr.df[,1]
+
+print(length(gene.list))
+```
+
+Run GSEA
+```{r}
+ontlist <- c("BP", "CC", "MF")
+simplist <- list()
+resultlist <- list()
+tib.list <- list()
+
+for (i in 1:length(ontlist)){
+  hsGO <- godata('org.Hs.eg.db', ont = ontlist[i])
+  set.seed(86)
+  gse <- gseGO(geneList=gene.list, 
+             ont = ontlist[i], 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = get(organism), 
+             pAdjustMethod = "none",
+             seed=T)
+  simp <- clusterProfiler::simplify(gse, 
+                                    semData = hsGO,
+                                    cutoff = 0.7)
+  simplist[[i]] <- simp
+  tib.list[[i]] <- as_tibble(simp@result)
+}
+
+gsea.diff.expression_sero_sex <- as_tibble(rbind(tib.list[[1]], tib.list[[2]], tib.list[[3]]))
+
+gsea.diff.expression_sero_sex$Description <- factor(gsea.diff.expression_sero_sex$Description, levels = gsea.diff.expression_sero_sex$Description[order(gsea.diff.expression_sero_sex$enrichmentScore)])
+
+
+fig3$j <- gsea.diff.expression_sero_sex %>%
+    filter(p.adjust < 0.0005) %>%
+    filter(setSize > 6) %>%
+    ggplot(aes(enrichmentScore, Description, size = setSize)) +
+    geom_point(aes(fill = p.adjust, size = setSize), colour="black", pch=21) +
+  labs(title = "Seroconversion and Sex", x = "Enrichment Score") +
+    scale_fill_viridis_c(name = "P Value") +
+    scale_size(name = "Gene Set Size", range = c(5, 25)) +
+    theme(text = element_text(size = 45),
+          legend.text = element_text(size = 30),
+          legend.key.height = unit(1, 'cm'))
+
+pdf(paste0("fig3l_SeroGSEA.pdf"),
+    height=20,
+    width=25)
+plot(fig3$l)
+dev.off()
+
+
+fig3$l
+```
+
+
+
+
+
+
+
+
+
+
+
+This code plots Baseline HAI and SeroConversion vs. other covariates, if desired.
+
+
+Plot differential expression of Baseline HAI:Sex
+```{r}
+genes <- toptags[[2]][[2]]$table
+genes <- genes[genes$FDR < 0.05,]
+genes <- rownames(genes)
+
+
+y <- DGEList(counts = counts.subset)
+
+log2tpm.genes <- log2(tpm.subset[genes,])
+
+plot.df <- melt(as.matrix(log2tpm.genes))
+plot.df <- plot.df[plot.df[,3] != -Inf,]
+x <- count(plot.df, vars = Var1)
+x <- filter(x, n > 100)
+
+genesig <- as.character(x$vars)
+log2tpm.genesig <- log2(tpm.subset[genesig,])
+plot.df <- melt(as.matrix(log2tpm.genesig))
+
+plot.df <- melt(as.matrix(log2tpm.genes))
+plot.df[,4] <- metadata$Composite_Baseline[match(plot.df[,2], metadata$File.Name)]
+plot.df[,5] <- metadata$Gender[match(plot.df[,2], metadata$File.Name)]
+#plot.df[,6] <- metadata$Agerange[match(plot.df[,2], metadata$File.Name)]
+
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl", mirror = "useast")
+
+plot.list <- list()
+
+for(j in 1:30){
+  plot.df.subset <- plot.df[plot.df[,1] == genesig[j],]
+  plot.df.subset <- plot.df.subset[plot.df.subset[,3] != -Inf,]
+  
+  genelist <- getBM(filters= "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values=plot.df.subset$Var1,
+                  mart= mart)
+  
+  plot.df.subset$Var7 <- genelist$hgnc_symbol[match(plot.df.subset$Var1, genelist$ensembl_gene_id)]
+  #if(is.na(plot.df.subset$Var5)){plot.df.subset$Var5 <- plot.df.subset$Var1[1]}
+  
+  plot.list[[j]] <- ggplot(data = plot.df.subset, aes(x = !!plot.df.subset[,4],
+                                                      y = !!plot.df.subset[,3],
+                                                      color = !!plot.df.subset[,5],
+                                                      group = !!plot.df.subset[,5])) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    guides(fill = 'none') +
+    labs(x = "Baseline HAI",
+         y = expression("log"[2]*TPM),
+         title = plot.df.subset[,6]) +
+    theme_bw()+
+    theme(plot.title = element_text(size = 10),
+          axis.text = element_text(size = 8),
+          axis.title = element_text(size = 10),
+          aspect.ratio = 1)
+  
+}
+
+plot.list
+```
+
+
+Plot differential expression of Seroconversion:Age
+```{r}
+genes <- toptags[[1]][[1]]$table
+genes <- genes[genes$FDR < 0.05,]
+genes <- rownames(genes)
+
+
+y <- DGEList(counts = counts.subset)
+
+log2tpm.genes <- log2(tpm.subset[genes,])
+
+plot.df <- melt(as.matrix(log2tpm.genes))
+plot.df <- plot.df[plot.df[,3] != -Inf,]
+x <- count(plot.df, vars = Var1)
+x <- filter(x, n > 100)
+
+genesig <- as.character(x$vars)
+log2tpm.genesig <- log2(tpm.subset[genesig,])
+plot.df <- melt(as.matrix(log2tpm.genesig))
+
+plot.df[,4] <- metadata$log2sero[match(plot.df[,2], metadata$File.Name)]
+plot.df[,5] <- metadata$Age[match(plot.df[,2], metadata$File.Name)]
+plot.df[,6] <- metadata$Agerange[match(plot.df[,2], metadata$File.Name)]
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+plot.list <- list()
+
+for(j in 1:30){
+  plot.df.subset <- plot.df[plot.df[,1] == genesig[j],]
+  plot.df.subset <- plot.df.subset[plot.df.subset[,3] != -Inf,]
+  
+  genelist <- getBM(filters= "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values=plot.df.subset$Var1,
+                  mart= mart)
+  
+  plot.df.subset$Var7 <- genelist$hgnc_symbol[match(plot.df.subset$Var1, genelist$ensembl_gene_id)]
+  #if(is.na(plot.df.subset$Var5)){plot.df.subset$Var5 <- plot.df.subset$Var1[1]}
+  
+  plot.list[[j]] <- ggplot(data = plot.df.subset, aes(x = !!plot.df.subset[,4],
+                                                      y = !!plot.df.subset[,3],
+                                                      color = !!plot.df.subset[,6],
+                                                      group = !!plot.df.subset[,6])) +
+    geom_point() +
+    geom_smooth(method = "lm") +
+    guides(fill = 'none') +
+    labs(x = "Seroconversion",
+         y = expression("log"[2]*TPM),
+         title = plot.df.subset[,7]) +
+    theme_bw()+
+    theme(plot.title = element_text(size = 10),
+          axis.text = element_text(size = 8),
+          axis.title = element_text(size = 10),
+          aspect.ratio = 1)
+  
+}
+
+plot.list
+```

@@ -1,0 +1,730 @@
+---
+title: "Differential Expression Analysis Day 0 Samples"
+author: "Megan Hockman"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+# Preanalysis
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(extrafont)
+library(remotes)
+remotes::install_version("Rttf2pt1", version = "1.3.8")
+extrafont::font_import()
+```
+
+```{r}
+library(biomaRt)
+library(cowplot)
+library(clusterProfiler)
+# library(DESeq2)
+library(edgeR)
+library(enrichplot)
+#library(gameofthrones)
+library(ggpubr)
+#library(GOSemSim)
+library(ggplot2)
+library(ggridges)
+# library(gprofiler2)
+# library(openxlsx)
+# library(pathview)
+library(reshape2)
+# library(see)
+library(splines)
+# library(SuperExactTest)
+library(UpSetR)
+library(png)
+library(ggpubr)
+library(dplyr)
+library(stringr) 
+library(gridExtra)
+library(egg)
+library(patchwork)
+#library(extrafont)
+```
+
+
+##Load the Data and log2 seroconversion
+
+```{r}
+load("C:/Users/chungm6/Desktop/projects/david_gresham_01/data.RData")
+
+metadata$log2sero <- log2(metadata$average_seroconversion)
+
+metadata$log2baseline <- log2(metadata$Composite_Baseline)
+
+```
+
+## Add metadata readout for categorizing average_seroconversion and day 0 serostatus
+```{r}
+metadata$seroconversion_2cat <- as.factor(ifelse(metadata$log2sero >= 2,"high","low"))
+metadata$D0_score_2cat <- as.factor(ifelse(metadata$Composite_Baseline >= 25, "high", "low"))
+
+sum(grepl("low", metadata$seroconversion_2cat))
+```
+# DE analysis
+
+##Set covariates of interest
+These include covariates that are well distributed across the subjects:
+1) BMI
+2) Gender
+3) Age
+4) Average seroconversion
+5) Baseline HAI
+```{r}
+covariates <- c("BMI_Value", "Gender", "Age", "log2sero", "log2baseline")
+
+covariates_titles <- c("BMI", "Sex", "Age", "Seroconversion", "Baseline HAI")
+
+#metadata$Seroconversion_bivar <- ifelse(metadata$Composite_SeroConversion > 8, "high", "low")
+```
+
+
+## Calculate Differential Expression based on selected covariates
+```{r}
+FDR.cutoff <- 0.05
+degenes.edgeR <- list()
+toptags <- list()
+
+for(j in 1:length(covariates)){
+  group <- metadata[,which(colnames(metadata) == covariates[j])]
+  
+  if(length(unique(group)) > 10){
+    spline <- ns(group, df = 1)
+    design <- model.matrix(~spline)
+  }else{
+    design <- model.matrix(formula(paste("~",covariates[j])),data = metadata)
+  }
+  
+  y <- DGEList(counts = counts.subset,
+               group = group)
+  
+  keep <- filterByExpr(y)
+  
+  y <- y[keep, ,keep.lib.sizes = F]
+  y <- calcNormFactors(y, method = "TMM")
+  y <- estimateDisp(y, design, robust = TRUE)
+  fit <- glmQLFit(y, design, robust = TRUE)
+  
+  qlf <- glmQLFTest(fit, coef = 2:ncol(design))
+  degenes <- topTags(qlf, n = Inf)
+  toptags[[j]] <- degenes
+  degenes.edgeR[[j]] <- rownames(degenes$table)[degenes@.Data[[1]]$FDR < FDR.cutoff]
+  
+}
+
+names(degenes.edgeR) <- covariates_titles
+
+```
+
+## Plot UpSet plot of Differentially expressed genes
+
+```{r}
+fig2$a<- upset(fromList(degenes.edgeR), 
+                order.by = "freq", 
+                nsets = length(covariates),
+                mainbar.y.max = 3000, 
+                text.scale = 5, 
+                mainbar.y.label = "Intersection Size", 
+                sets.x.label = "Differentially\nExpressed Genes", 
+                point.size = 6,
+                line.size = 1, 
+                nintersects = 12,
+               set_size.show = TRUE)
+
+
+x1 <- unlist(degenes.edgeR, use.names = FALSE)
+rownames(fig2$a$New_data) <- x1[ !duplicated(x1) ]
+
+sero_exclusive <- rownames(fig2$a$New_data)[fig2$a$New_data$Seroconversion == 1 & rowSums(fig2$a$New_data) == 1]
+```
+
+
+## Switch TPM rownames to gene names and subset by log2sero DE genes
+
+```{r}
+ensembl <- useEnsembl(biomart = "genes")
+ensembl <- useDataset(dataset = "hsapiens_gene_ensembl", mart = ensembl)
+biomart <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name'),
+                filters = 'ensembl_gene_id',
+                values = degenes.edgeR$Seroconversion, 
+                mart = ensembl)
+biomart <- biomart[match(degenes.edgeR$Seroconversion,biomart[,1]),]
+biomart[,1] <- degenes.edgeR$Seroconversion
+
+biomart[,2] <- ifelse(biomart[,2] == "" | biomart[,2] == "Metazoa_SRP",biomart[,1],biomart[,2])
+
+biomart[,2] <- make.names(biomart[,2],unique = T)
+
+tpm.subset <- tpm.subset[degenes.edgeR$Seroconversion,]
+
+rownames(tpm.subset) <- biomart[,2]
+degenes.edgeR$Seroconversion <- biomart[,2]
+sero_exclusive <- biomart[match(sero_exclusive,biomart[,1]),2]
+```
+
+# RF analysis
+
+## Create random forest model
+
+### Create container for Fig 5 and 6
+
+```{r}
+fig5 <- list()
+fig6 <- list()
+```
+
+### Split data into training and testing sets
+
+```{r}
+covar2 <- c("Age","Gender","BMI_Value","Prevacc.naive","D0_score_2cat")
+
+seeds <- c(80:89)
+rf.alldata <- list(metadata=as.data.frame(metadata[match(colnames(tpm.subset),metadata$File.Name),covar2]),
+                   rnaseq=t(tpm.subset),
+                   rnaseq_top=t(tpm.subset[1:round(ncol(tpm.subset) * 0.75),]),
+                   rnaseq_exclusive=t(tpm.subset[sero_exclusive,]),
+                   both=as.data.frame(cbind(metadata[match(colnames(tpm.subset),metadata$File.Name),covar2],
+                                            t(tpm.subset))),
+                   both_top=as.data.frame(cbind(metadata[match(colnames(tpm.subset),metadata$File.Name),covar2],
+                                            t(tpm.subset[1:round(ncol(tpm.subset) * 0.75),]))),
+                   both_exclusive=as.data.frame(cbind(metadata[match(colnames(tpm.subset),metadata$File.Name),covar2],
+                                            t(tpm.subset[sero_exclusive,]))))
+
+rf.traindata <- list()
+rf.testdata <- list()
+
+library(caTools)
+for(i in 1:length(rf.alldata)){
+  rf.traindata[[i]] <- list()
+  rf.testdata[[i]] <- list()
+  for(j in 1:length(seeds)){
+    set.seed(seeds[j])
+    sample = sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    rf.traindata[[i]][[j]] = rf.alldata[[i]][sample == T,]
+    rf.testdata[[i]][[j]]  = rf.alldata[[i]][sample == F,]
+  }
+}
+names(rf.traindata) <- names(rf.alldata)
+names(rf.testdata) <- names(rf.alldata)
+```
+
+### Tune random forest model for optimal number of variables sampled at each split
+
+```{r,warning=FALSE,message = FALSE}
+rf.mdl <- list()
+
+library(randomForest)
+for(i in 1:length(rf.alldata)){
+  rf.mdl[[i]] <- list()
+  for(j in 1:length(seeds)){
+    set.seed(seeds[j])
+    sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    set.seed(seeds[j])
+    mtry <- tuneRF(x = rf.traindata[[i]][[j]],
+                   y = metadata$seroconversion_2cat[sample == T],
+                   mtryStart=round(sqrt(ncol(rf.traindata[[i]][[j]]))),
+                   ntreeTry=500,
+                   stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+    best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+  
+    set.seed(seeds[j])
+    sample = sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    set.seed(seeds[j])
+    rf.mdl[[i]][[j]] <-randomForest(x = rf.traindata[[i]][[j]],
+                                y = metadata$seroconversion_2cat[sample == T],
+                                mtry=best.m,
+                                ntree=500,
+                                proximity =T,
+                                importance = T)
+  }
+}
+```
+
+### Plot average OOB error
+
+```{r,fig.height=3,fig.width=6}
+oob.error <- as.data.frame(matrix(nrow=0,
+                                  ncol=2))
+colnames(oob.error) <- c("dataset","errrate")
+for(i in 1:length(rf.mdl)){
+  oob.error <- as.data.frame(rbind(oob.error,
+                                   cbind(names(rf.alldata)[i],
+                                         unlist(lapply(rf.mdl[[i]],function(x){x$err.rate[500,1]})))))
+  
+  
+}
+
+plot.df <- oob.error
+
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+
+plot.df[,1] <- factor(plot.df[,1],
+                      levels=unique(plot.df[,1]))
+plot.df$labels <- NA
+plot.df$labels[plot.df[,1] == "metadata"] <- "Physiological Data"
+plot.df$labels[plot.df[,1] == "rnaseq"] <- "Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_top"] <- "Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_exclusive"] <- "Only Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both"] <- "Physiological Data + Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_top"] <- "Physiological Data + Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_exclusive"] <- "Physiological Data + Only Seroconversion DE Genes"
+
+plot.df$labels <- factor(plot.df$labels,
+                         levels=rev(unique(plot.df$labels)))
+
+
+# labels <- c(rep("Physiological Data", 10), rep("Seroconversion DE Genes", 10), rep("Physiological Data + Seroconversion DE Genes", 10))
+# plot.df$labels <- labels
+
+
+
+oob.plot <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[,2],
+                     y=!!plot.df[,3],
+                     fill=!!plot.df[,3]),
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[,2],
+                  y=!!plot.df[,3]))+
+    guides(fill = 'none')+
+    labs(x="OOB estimate of error rate",y="")+
+    theme_bw()
+
+oob.plot
+```
+
+
+### Plot boxplot of AUC values from ROC curves
+
+```{r,fig.height=3,fig.width=6}
+auc <- c()
+for(i in 1:length(rf.mdl)){
+  for(j in 1:length(rf.mdl[[i]])){
+    set.seed(seeds[j])
+    sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+    
+    # rocobj <- roc(metadata$seroconversion_2cat[sample == F],
+    #               predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1],
+    #               smooth=T)
+    auc <- c(auc,
+             auc(metadata$seroconversion_2cat[sample == F],
+                  predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1]))
+  }
+}
+plot.df <- as.data.frame(cbind(oob.error[,1],
+                               auc))
+
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+plot.df$labels <- NA
+plot.df$labels[plot.df[,1] == "metadata"] <- "Physiological Data"
+plot.df$labels[plot.df[,1] == "rnaseq"] <- "Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_top"] <- "Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_exclusive"] <- "Only Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both"] <- "Physiological Data + Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_top"] <- "Physiological Data + Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_exclusive"] <- "Physiological Data + Only Seroconversion DE Genes"
+
+plot.df$labels <- factor(plot.df$labels,
+                         levels=rev(unique(plot.df$labels)))
+auc.boxplot <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[,2],
+                     y=!!plot.df[,3],
+                     fill=!!plot.df[,3]),
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[,2],
+                  y=!!plot.df[,3]))+
+  guides(fill='none')+
+    labs(x="AUC",y="")+
+    theme_bw()
+
+auc.boxplot
+
+aggregate(.~V1,data=plot.df[,1:2],mean)
+
+```
+### Plot Fig5ab
+
+```{r,fig.height=3,fig.width=11}
+egg::ggarrange(oob.plot,
+              auc.boxplot+
+                theme(axis.text.y = element_blank()),
+              ncol=2)
+
+fig5$a <- oob.plot
+fig5$b <- auc.boxplot+
+  theme(axis.text.y = element_blank())
+```
+
+
+### Plot confusion matrices
+
+```{r,fig.height=5,fig.width=15}
+reduceApplyListOfArrays<- function(x){
+     y<-apply(array(unlist(x), c(dim(x[[1]]), dim(x[[2]]), length(x))), 
+              c(1,2), mean)
+     colnames(y)<-colnames(x[[1]])
+     rownames(y)<-rownames(x[[1]])
+  return(y)
+}
+
+confusion_matrix_plots.list <- list()
+
+titles <- c("Physiological Data", "Seroconversion DE Genes", "Top Seroconversion DE Genes","Only Seroconversion DE Genes",
+            "Physiological Data + Seroconversion DE Genes","Physiological Data + Top Seroconversion DE Genes",
+            "Physiological Data + Only Seroconversion DE Genes")
+
+for(i in 1:length(rf.mdl)){
+  matrix.list <- lapply(rf.mdl[[i]],function(x){return(x$confusion)})
+  
+  plot.df <- melt(reduceApplyListOfArrays(matrix.list)[1:2,1:2])
+  
+  plot.df[,1] <- factor(plot.df[,1],levels=c("low","high"))
+  plot.df[,2] <- factor(plot.df[,2],levels=c("low","high"))
+  
+  confusion_matrix_plots.list[[i]] <- ggplot(plot.df , aes(x = Var2, y = Var1, fill = value)) +
+    geom_tile(color = "white",
+              lwd = 1.5,
+              linetype = 1) +
+    geom_text(aes(label = paste0(value,"\n",round(value/sum(value)*100,2),"%")), color = "black", size = 4) +
+    scale_fill_gradient2(low = "#075AFF",
+                         mid = "#FFFFCC",
+                         high = "#FF0000") +
+    labs(x="predicted values",y="actual values",fill="", title = titles[i])+
+    theme_minimal() +
+    coord_fixed()
+}
+names(confusion_matrix_plots.list) <- titles
+egg::ggarrange(confusion_matrix_plots.list$`Physiological Data`,
+               confusion_matrix_plots.list$`Only Seroconversion DE Genes`,
+               confusion_matrix_plots.list$`Physiological Data + Only Seroconversion DE Genes`,
+          ncol=3)
+fig5$c <- confusion_matrix_plots.list
+
+fig5$c <- egg::ggarrange(confusion_matrix_plots.list$`Physiological Data`,
+               confusion_matrix_plots.list$`Only Seroconversion DE Genes`,
+               confusion_matrix_plots.list$`Physiological Data + Only Seroconversion DE Genes`,
+          ncol=3)
+```
+
+
+### Run crossvalidation for random forest
+
+```{r,fig.height=5,fig.width=11}
+library(rfUtilities)
+
+plots  <- list()
+for(i in 1:length(rf.mdl)){
+  set.seed(86)
+  rf.cv <- rfcv(trainx = rf.alldata[[i]], 
+                trainy = metadata$seroconversion_2cat, 
+                mtryStart=round(sqrt(ncol(rf.traindata[[i]][[1]]))),
+                cv.fold=10)
+  plot <- ggplot(mapping=aes(x=!!rf.cv$n.var,
+                                         y=!!rf.cv$error.cv))+
+                            geom_point(size=2)+
+                            geom_line(size=1)+
+                            labs(x="Number of Variables",y="Cross Validation Error")+
+                            scale_x_continuous(trans="log10")+
+                            theme_bw()
+  plots[[i]] <- plot
+  print(i)
+}
+names(plots) <- titles
+
+fig5$d <- egg::ggarrange(plots$`Physiological Data`,
+                         plots$`Only Seroconversion DE Genes`,
+                         plots$`Physiological Data + Only Seroconversion DE Genes`,
+          ncol=3)
+```
+
+
+### Plot Fig5
+```{r,fig.height=8,fig.width=11}
+fig5ab <- egg::ggarrange(fig5$a,fig5$b,ncol=2)
+fig5c <-fig5$c
+fig5d <- fig5$d
+
+pdf("fig5.pdf",
+    height=8,
+    width=11)
+plot_grid(fig5ab, fig5c, fig5d,
+          rel_heights = c(1.5, 2, 2),
+          labels = c("A", "C", "D"),
+          ncol = 1)
+dev.off()
+
+png("fig5.png",
+    height = 3000,
+    width = 4000,
+    units = "px",
+    res = 300)
+
+plot_grid(fig5ab, fig5c, fig5d,
+          rel_heights = c(1.5, 2, 2),
+          labels = c("A", "C", "D"),
+          ncol = 1)
+dev.off()
+```
+
+
+### Plot random forest variable importance
+
+```{r,fig.height=8,fig.width=11}
+colors <- c("#FB61D7","#A58AFF","#00B6EB","#00C094","#53B400","#C49A00","#F8766D")
+
+acc_plots.mda.list <- list()
+acc_plots.mdg.list <- list()
+
+for(i in 1:length(rf.mdl)){
+  importance.df <- do.call(cbind,lapply(rf.mdl[[i]],function(x){return(x$importance)}))
+  rownames(importance.df) <- gsub("Gender","Sex",rownames(importance.df))
+  rownames(importance.df) <- gsub("BMI_Value","BMI",rownames(importance.df))
+  rownames(importance.df) <- gsub("Prevacc.naive","Previous Vaccination",rownames(importance.df))
+  rownames(importance.df) <- gsub("D0_score_2cat", "Baseline HAI", rownames(importance.df))
+  
+  acc.order <- rownames(importance.df)[order(-rowMeans(importance.df[,colnames(importance.df) == "MeanDecreaseAccuracy"]))]
+  gini.order <- rownames(importance.df)[order(-rowMeans(importance.df[,colnames(importance.df) == "MeanDecreaseGini"]))]
+  
+  if(i!=1){
+    acc.order <- acc.order[1:30]
+    gini.order <- gini.order[1:30]
+  }
+  
+  plot.df <- melt(importance.df)
+  plot.df <- plot.df[plot.df[,1] %in% acc.order,]
+  plot.df[,1] <- factor(plot.df[,1],levels=rev(acc.order))
+  
+  acc_plots.mda.list[[i]] <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",3],
+                     y=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",1]),
+                 fill=colors[i],
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",3],
+                   y=!!plot.df[plot.df[,2] == "MeanDecreaseAccuracy",1]))+
+    labs(x="Mean Decrease Accuracy",y="")+
+    theme_bw()
+  
+  plot.df <- melt(importance.df)
+  plot.df <- plot.df[plot.df[,1] %in% gini.order,]
+  plot.df[,1] <- factor(plot.df[,1],levels=rev(gini.order))
+
+  acc_plots.mdg.list[[i]] <- ggplot()+
+    geom_boxplot(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseGini",3],
+                     y=!!plot.df[plot.df[,2] == "MeanDecreaseGini",1]),
+                 fill=colors[i],
+                 outlier.shape = NA)+
+    geom_point(aes(x=!!plot.df[plot.df[,2] == "MeanDecreaseGini",3],
+                   y=!!plot.df[plot.df[,2] == "MeanDecreaseGini",1]))+
+    labs(x="Mean Decrease Gini",y="")+
+    theme_bw()
+}
+names(acc_plots.mda.list) <- titles
+names(acc_plots.mdg.list) <- titles
+
+acc_plots.list
+
+fig6ab <- plot_grid(acc_plots.mda.list$`Physiological Data`, 
+                    acc_plots.mdg.list$`Physiological Data`,
+                    nrow=1, labels = c("A", "B"))
+
+fig6cdef <- plot_grid(acc_plots.mda.list$`Only Seroconversion DE Genes`,
+                      acc_plots.mdg.list$`Only Seroconversion DE Genes`,
+                      acc_plots.mda.list$`Physiological Data + Only Seroconversion DE Genes`,
+                      acc_plots.mda.list$`Physiological Data + Only Seroconversion DE Genes`,
+                     nrow = 1,
+                     labels = c("C", "D", "E", "F"))
+```
+
+  
+### Plot Fig 6
+```{r,fig.height=8,fig.width=11}
+pdf("fig6.pdf",
+    height=8,
+    width=13)
+plot_grid(fig6ab, fig6cdef, ncol = 1, rel_heights = c(1, 3))
+dev.off()
+```
+
+# Testing if # of trees matter
+
+## Create random forest model
+
+### Test different ntrees while tuning random forest model for optimal number of variables sampled at each split
+
+```{r,warning=FALSE,message = FALSE}
+ntrees <- c(50,100,500,1000,5000)
+
+rf.mdl <- list()
+
+library(randomForest)
+for(h in 1:length(ntrees)){
+  rf.mdl[[h]] <- list()
+  for(i in 1:length(rf.alldata)){
+    rf.mdl[[h]][[i]] <- list()
+    for(j in 1:length(seeds)){
+      set.seed(seeds[j])
+      sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+      
+      set.seed(seeds[j])
+      mtry <- tuneRF(x = rf.traindata[[i]][[j]],
+                     y = metadata$seroconversion_2cat[sample == T],
+                     mtryStart=round(sqrt(ncol(rf.traindata[[i]][[j]]))),
+                     ntreeTry=ntrees[h],
+                     stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+      best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+    
+      set.seed(seeds[j])
+      sample = sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+      
+      set.seed(seeds[j])
+      rf.mdl[[h]][[i]][[j]] <-randomForest(x = rf.traindata[[i]][[j]],
+                                  y = metadata$seroconversion_2cat[sample == T],
+                                  mtry=best.m,
+                                  ntree=ntrees[h],
+                                  proximity =T,
+                                  importance = T)
+    }
+  }
+}
+```
+
+
+### Plot average OOB error
+
+```{r,fig.height=3,fig.width=6}
+oob.error <- as.data.frame(matrix(nrow=0,
+                                  ncol=3))
+colnames(oob.error) <- c("dataset","ntree","errrate")
+for(h in 1:length(ntrees)){
+  for(i in 1:length(rf.mdl[[h]])){
+    oob.error <- as.data.frame(rbind(oob.error,
+                                     cbind(names(rf.alldata)[i],
+                                           ntrees[h],
+                                           unlist(lapply(rf.mdl[[h]][[i]],function(x){x$err.rate[length(x),1]})))))
+  }
+}
+
+plot.df <- oob.error
+
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+
+plot.df[,1] <- factor(plot.df[,1],
+                      levels=unique(plot.df[,1]))
+plot.df$labels <- NA
+plot.df$labels[plot.df[,1] == "metadata"] <- "Physiological Data"
+plot.df$labels[plot.df[,1] == "rnaseq"] <- "Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_top"] <- "Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_exclusive"] <- "Only Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both"] <- "Physiological Data + Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_top"] <- "Physiological Data + Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_exclusive"] <- "Physiological Data + Only Seroconversion DE Genes"
+
+plot.df$labels <- factor(plot.df$labels,
+                         levels=rev(unique(plot.df$labels)))
+
+plot.list <- list()
+for(i in 1:length(ntrees)){
+  plot.df.subset <- plot.df[plot.df$V2 == ntrees[i],]
+  
+  plot.df.subset[,3] <- as.numeric(as.character(plot.df.subset[,3]))
+  plot.list[[i]] <- ggplot()+
+      geom_boxplot(aes(x=!!plot.df.subset[,3],
+                       y=!!plot.df.subset[,4],
+                       fill=!!plot.df.subset[,4]),
+                   outlier.shape = NA)+
+      geom_point(aes(x=!!plot.df.subset[,3],
+                    y=!!plot.df.subset[,4]))+
+      guides(fill = 'none')+
+      labs(x="OOB estimate of error rate",y="",title=paste0("ntree: ",ntrees[i]))+
+      theme_bw()
+}
+
+plot.list
+
+oob.ntree.boxplot <- plot.list
+```
+
+
+### Plot boxplot of AUC values from ROC curves
+
+```{r,fig.height=3,fig.width=6}
+auc <- c()
+for(h in 1:length(ntrees)){
+  for(i in 1:length(rf.mdl[[h]])){
+    for(j in 1:length(rf.mdl[[h]][[i]])){
+      set.seed(seeds[j])
+      sample <- sample.split(metadata$seroconversion_2cat, SplitRatio = .75)
+      
+      # rocobj <- roc(metadata$seroconversion_2cat[sample == F],
+      #               predict(rf.mdl[[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1],
+      #               smooth=T)
+      auc <- c(auc,
+               auc(metadata$seroconversion_2cat[sample == F],
+                    predict(rf.mdl[[h]][[i]][[j]], newdata=rf.testdata[[i]][[j]],type="prob")[,1]))
+    }
+  }
+}
+plot.df <- as.data.frame(cbind(oob.error[,1],
+                               oob.error[,2],
+                               auc))
+
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+plot.df$labels <- NA
+plot.df$labels[plot.df[,1] == "metadata"] <- "Physiological Data"
+plot.df$labels[plot.df[,1] == "rnaseq"] <- "Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_top"] <- "Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "rnaseq_exclusive"] <- "Only Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both"] <- "Physiological Data + Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_top"] <- "Physiological Data + Top Seroconversion DE Genes"
+plot.df$labels[plot.df[,1] == "both_exclusive"] <- "Physiological Data + Only Seroconversion DE Genes"
+
+plot.df$labels <- factor(plot.df$labels,
+                         levels=rev(unique(plot.df$labels)))
+
+plot.list <- list()
+for(i in 1:length(ntrees)){
+  plot.df.subset <- plot.df[plot.df[,2] == ntrees[i],]
+  plot.df.subset[,3] <- as.numeric(as.character(plot.df.subset[,3]))
+  
+  plot.list[[i]] <- ggplot()+
+      geom_boxplot(aes(x=!!plot.df.subset[,3],
+                       y=!!plot.df.subset[,4],
+                       fill=!!plot.df.subset[,4]),
+                   outlier.shape = NA)+
+      geom_point(aes(x=!!plot.df.subset[,3],
+                    y=!!plot.df.subset[,4]))+
+      guides(fill='none')+
+        labs(x="AUC",y="",title=paste0("ntree: ",ntrees[i]))+
+        theme_bw()
+}
+
+auc.ntree.boxplot <- plot.list
+
+```
+
+```{r,fig.width=8,fig.height=10}
+for(i in 1:length(auc.ntree.boxplot)){
+  auc.ntree.boxplot[[i]] <- auc.ntree.boxplot[[i]]+
+    theme(axis.text.y = element_blank())
+  
+}
+
+pdf("fig_s16.pdf",
+    height=10,
+    width=8)
+egg::ggarrange(plots = c(oob.ntree.boxplot[1],auc.ntree.boxplot[1],
+                         oob.ntree.boxplot[2],auc.ntree.boxplot[2],
+                         oob.ntree.boxplot[3],auc.ntree.boxplot[3],
+                         oob.ntree.boxplot[4],auc.ntree.boxplot[4],
+                         oob.ntree.boxplot[5],auc.ntree.boxplot[5]),
+               ncol=2)
+dev.off()
+
+```

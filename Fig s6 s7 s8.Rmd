@@ -1,0 +1,315 @@
+---
+title: "HAI Analysis v5: QC and Univariate Analyses"
+author: "Matthew Chung"
+date: "9/22/2021"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+# Preanalysis
+
+## Load packages and view sessionInfo
+
+```{r,warning=FALSE,message = FALSE}
+library(biomaRt)
+library(cowplot)
+library(clusterProfiler)
+library(cowplot)
+library(DESeq2)
+library(edgeR)
+library(enrichplot)
+library(ggplot2)
+library(gprofiler2)
+library(openxlsx)
+library(pathview)
+library(reshape2)
+library(see)
+library(splines)
+library(SuperExactTest)
+library(UpSetR)
+library(readr)
+library(dplyr)
+library(forcats)
+```
+
+#MRH 26May2022: 
+##Upload the .RData file made in preprocessing to get data that's already undergone necessary processing.
+
+```{r}
+load("../data.RData")
+tpm.hemoglobin <- read.csv("../tpm.hemoglobin.csv", row.names = 1)
+
+
+
+metadata$log2sero <- log2(metadata$average_seroconversion)
+metadata$seroconversion_2cat <- as.factor(ifelse(metadata$log2sero >= 2,"high","low"))
+metadata$D0_score_2cat <- as.factor(ifelse(metadata$Composite_Baseline >= 25, "high", "low"))
+```
+
+## Set metadata covariates
+###MRH Edit: Removed "Composite_SeroConversion", "CorrectedSeroconversion_composite" and added "log2sero", 
+
+
+```{r}
+covar1 <- c("log2sero","Run.ID","Age","Gender","BMI_Value", 
+            "Race_Ethnicity","Month.vaccinated","Composite_Baseline","Composite_D28","Prevacc.naive")
+```
+
+# Data QC: Distribution of gene counts per sample
+
+## Plot gene count distribution
+
+```{r,fig.height=4,fig.width=2}
+figs4 <- ggplot()+
+  geom_violinhalf(aes(x="A",y=colSums(counts.subset)),fill="#f8766d")+
+  geom_boxplot(aes(x="A",y=colSums(counts.subset)),fill="#f8766d",width=0.2)+
+  geom_jitter(aes(x="A",y=colSums(counts.subset)),alpha=0.5)+
+  labs(y="protein-coding gene counts")+
+  theme_bw()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+png(filename = "figs6.png",
+    height = 2000,
+    width = 800,
+    units = "px",
+    res = 300)
+figs4
+dev.off()
+
+pdf(paste0("figs6.pdf"),
+    height = 25,
+    width = 10)
+figs4
+dev.off()
+```
+
+# MDS/PC plot showing major sources of variation (Batch effect, sex)
+
+## Set plotting functions
+
+```{r}
+plot_mds <- function(mds, comp1, comp2, groups){
+  plot.df <- as.data.frame(cbind(mds$points[,comp1],
+                                 mds$points[,comp2]))
+  # imp1 <- summary(pca)$importance[2,comp1]
+  # imp2 <- summary(pca)$importance[2,comp2]
+  
+  set.seed(2)
+  plot.df <- plot.df[sample(1:nrow(plot.df)),]
+  set.seed(2)
+  groups <- groups[sample(1:nrow(plot.df))]
+  
+  
+  plot <- ggplot()+
+    geom_point(aes(x=!!plot.df[,1],y=!!plot.df[,2],color=!!groups))+
+    labs(x=paste0("MDS",comp1),
+         y=paste0("MDS",comp2))+
+    guides(color = "none")+
+    theme_bw()
+  
+  if(type(groups) == "double"){
+    plot <- plot+
+      scale_color_gradient2(mid = "blue",high="orange")
+  }
+  
+  return(plot)
+}
+
+plot_pca <- function(pca, comp1, comp2, groups){
+  plot.df <- as.data.frame(cbind(pca$x[,comp1],
+                                 pca$x[,comp2]))
+  imp1 <- summary(pca)$importance[2,comp1]
+  imp2 <- summary(pca)$importance[2,comp2]
+  
+  set.seed(2)
+  plot.df <- plot.df[sample(1:nrow(plot.df)),]
+  set.seed(2)
+  groups <- groups[sample(1:nrow(plot.df))]
+  
+  
+  plot <- ggplot()+
+    geom_point(aes(x=!!plot.df[,1],y=!!plot.df[,2],color=!!groups))+
+    labs(x=paste0("PC",comp1," (",round(imp1*100,2),"%)"),
+         y=paste0("PC",comp2," (",round(imp2*100,2),"%)"))+
+    guides(color = "none")+
+    theme_bw()
+  
+  if(type(groups) == "double"){
+    plot <- plot+
+      scale_color_gradient2(mid = "blue",high="orange")
+  }
+  return(plot)
+}
+
+plot_legend <- function(name,groups){
+  plot <- ggplot()+
+    geom_point(aes(x="1",y="1",color=!!groups))+
+    labs(color=name)+
+    theme_bw()
+  
+  if(type(groups) == "double"){
+    plot <- plot+
+      scale_color_gradient2(mid = "blue",high="orange")
+  }
+  legend <- get_legend(plot)
+  return(legend)
+}
+```
+
+## Plot legends
+```{r,fig.width=12,fig.height=6}
+plot.list <- list()
+for(i in 1:length(covar1)){
+  #legend <- ggdraw(plot_legend(covar1[i],groups=metadata[,colnames(metadata) == covar1[i]]))
+  
+  plot.list[[i]] <- plot_legend(covar1[i],groups=metadata[,colnames(metadata) == covar1[i]])
+  
+}
+plot_grid(plotlist = plot.list,ncol=5,align='hv')
+```
+
+## Run and plot PCA
+
+```{r,fig.height=20,fig.width=12}
+covartitles <- c("Log2 Seroconversion", "Run ID", "Age", "Gender", "BMI", "Race/Ethnicity", "Month Vaccinated", "Average Baseline HAI", "Average D28 HAI", "Prevaccination Status")
+
+pca.df <- tpm.subset
+# pca.df <- t(scale(t(log2(tpm.subset+1))))
+
+pca <- prcomp(t(pca.df),scale. = TRUE)
+#pca <- prcomp(t(pca.df), center = TRUE,scale. = TRUE)
+
+plot.list <- list()
+for(i in 1:length(covar1)){
+  plot.list <- append(plot.list,
+                     list(plot_pca(pca,1,2,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covartitles[i]),
+                          plot_pca(pca,2,3,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covartitles[i]),
+                          plot_pca(pca,3,4,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covartitles[i]),
+                          plot_pca(pca,4,5,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covartitles[i]),
+                          plot_pca(pca,5,6,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covartitles[i])))
+}
+
+plot_grid(plotlist = plot.list,ncol=5,align='hv')
+
+figs8 <- plot_grid(plotlist = plot.list,ncol=5,align='hv')
+
+png(filename = "figs8.png",
+    height = 5500,
+    width = 4000,
+    units = "px",
+    res = 300)
+figs8
+dev.off()
+
+pdf(paste0("figs8.pdf"),
+    height = 17,
+    width = 12)
+figs8
+dev.off()
+
+```
+
+## Run and plot MDS
+
+```{r,fig.height=20,fig.width=12}
+mds <- cmdscale(dist(t(pca.df)), k = 10, eig=TRUE)
+
+plot.list <- list()
+for(i in 1:length(covar1)){
+  plot.list <- append(plot.list,
+                     list(plot_mds(mds,1,2,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covar1[i]),
+                          plot_mds(mds,2,3,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covar1[i]),
+                          plot_mds(mds,3,4,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covar1[i]),
+                          plot_mds(mds,4,5,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covar1[i]),
+                          plot_mds(mds,5,6,groups=metadata[,colnames(metadata) == covar1[i]])+
+                             labs(title=covar1[i])))
+}
+
+plot_grid(plotlist = plot.list,ncol=5,align='hv')
+```
+
+# Cumulative probability plot showing fraction of total reads (y-axis) vs ranked genes (x axis)
+
+## Plot cumulative probability plot
+
+```{r}
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+
+top_exp_genes <- rownames(tpm.hemoglobin)[rev(order(rowMeans(tpm.hemoglobin)))][1:20]
+
+plot.df <- tpm.hemoglobin[rev(match(top_exp_genes,rownames(tpm.hemoglobin))),]
+plot.df <- melt(as.matrix(plot.df))
+
+genenames <- as.data.frame(matrix(nrow = nrow(plot.df),
+                                 ncol = 2))
+geneids <- as.character(unique(plot.df$Var1))
+genenames <- as.data.frame(getBM(filters= "ensembl_gene_id", 
+                  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                  values=geneids,
+                  mart= mart))
+
+if(genenames$hgnc_symbol %in% ""){genenames$hgnc_symbol <- "NA"}
+
+
+plot.df$names <- as.factor(genenames$hgnc_symbol[match((plot.df$Var1), genenames$ensembl_gene_id)])
+for(i in 1:nrow(plot.df)){ 
+  plot.df$names <- as.character(plot.df$names)
+  plot.df$Var1 <- as.character(plot.df$Var1)
+  if(plot.df[i,4] ==""){plot.df[i,4] <- plot.df[i,1]}
+}
+
+plot.df$names <- as.factor(plot.df$names)
+plot.df$Var1 <- as.factor(plot.df$Var1)
+
+high_exp_hemo_genes <- c("ENSG00000188536","ENSG00000244734","ENSG00000206172")
+hemo_genes <- c("HBA2", "HBB", "HBA1")
+
+boxfill <- ifelse(levels(plot.df[,1]) %in% high_exp_hemo_genes,"red",NA)
+
+
+summ <- plot.df %>% group_by(names) %>% summarize(mean = mean(value))
+
+plot.df$summ <- summ$mean[match(plot.df$names, summ$names)]
+
+plot.df <-  arrange(plot.df, plot.df$summ) 
+boxfill_hemo <- ifelse(levels(plot.df$names) %in% hemo_genes,"red",NA)
+
+
+figs7 <- ggplot()+
+  geom_boxplot(aes(x=plot.df[,3],
+                   y=plot.df[,4]),
+                   fill = boxfill_hemo)+
+  labs(x="average TPM",y="")+
+  scale_x_continuous(trans="log10")+
+  theme_bw()
+
+figs7
+
+png(filename = "figs7.png",
+    height = 2000,
+    width = 2000,
+    units = "px",
+    res = 300)
+figs7
+dev.off()
+
+pdf(paste0("figs7.pdf"),
+    height = 10,
+    width = 10)
+figs7
+dev.off()
+```
+
